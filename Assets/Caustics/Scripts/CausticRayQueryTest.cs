@@ -1,4 +1,6 @@
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -6,30 +8,35 @@ namespace CausticMeshDxr
 {
     public sealed class CausticRayQueryTest : MonoBehaviour
     {
-        const int VertexCount = 3;
+        const int GridResolution = 4;
+        const int VertexCount = GridResolution * GridResolution;
+        const int CellCount = GridResolution - 1;
+        const int TriangleCount = CellCount * CellCount * 2;
+        const int DrawVertexCount = TriangleCount * 3;
+        const int ComputeThreadCount = 64;
         const uint ReceiverMask = 1;
         const uint ReceiverInstanceId = 1;
 
         static readonly int AccelerationStructureId = Shader.PropertyToID("_AccelerationStructure");
+        static readonly int SourceVerticesId = Shader.PropertyToID("_SourceVertices");
+        static readonly int SourceIndicesId = Shader.PropertyToID("_SourceIndices");
         static readonly int HitsId = Shader.PropertyToID("_Hits");
+        static readonly int TriangleResultsId = Shader.PropertyToID("_TriangleResults");
         static readonly int SourceLocalToWorldId = Shader.PropertyToID("_SourceLocalToWorld");
         static readonly int SourceNormalId = Shader.PropertyToID("_SourceNormal");
         static readonly int SourceSizeId = Shader.PropertyToID("_SourceSize");
+        static readonly int VertexCountId = Shader.PropertyToID("_VertexCount");
+        static readonly int TriangleCountId = Shader.PropertyToID("_TriangleCount");
         static readonly int IncidentDirectionId = Shader.PropertyToID("_IncidentDirection");
         static readonly int EtaId = Shader.PropertyToID("_Eta");
         static readonly int RayTMinId = Shader.PropertyToID("_RayTMin");
         static readonly int RayTMaxId = Shader.PropertyToID("_RayTMax");
-        static readonly int TriangleResultId = Shader.PropertyToID("_TriangleResult");
         static readonly int MinReceiverAreaId = Shader.PropertyToID("_MinReceiverArea");
         static readonly int ColorId = Shader.PropertyToID("_Color");
         static readonly int IntensityScaleId = Shader.PropertyToID("_IntensityScale");
 
-        static readonly Vector3[] LocalVertices =
-        {
-            new(-0.5f, 0, -0.5f),
-            new(-0.5f, 0,  0.5f),
-            new( 0.5f, 0, -0.5f),
-        };
+        static readonly Vector3[] LocalVertices = CreateGridVertices();
+        static readonly uint[] SourceIndices = CreateGridIndices();
 
         [Header("Scene")]
         [SerializeField] MeshRenderer receiver;
@@ -54,12 +61,14 @@ namespace CausticMeshDxr
         [SerializeField, Min(0)] float scalarRelativeTolerance = 0.0001f;
 
         RayTracingAccelerationStructure accelerationStructure;
+        GraphicsBuffer sourceVertexBuffer;
+        GraphicsBuffer sourceIndexBuffer;
         GraphicsBuffer hitBuffer;
         GraphicsBuffer triangleResultBuffer;
         Material projectedTriangleMaterial;
         int receiverHandle = -1;
         int traceKernel;
-        int buildTriangleKernel;
+        int buildTrianglesKernel;
         bool initialized;
         int readbackPendingCount;
         bool hasDispatched;
@@ -87,6 +96,45 @@ namespace CausticMeshDxr
             public uint valid;
         }
 
+        static Vector3[] CreateGridVertices()
+        {
+            var vertices = new Vector3[VertexCount];
+            for (var z = 0; z < GridResolution; z++)
+            {
+                for (var x = 0; x < GridResolution; x++)
+                {
+                    vertices[z * GridResolution + x] = new Vector3(
+                        (float)x / CellCount - 0.5f,
+                        0,
+                        (float)z / CellCount - 0.5f);
+                }
+            }
+            return vertices;
+        }
+
+        static uint[] CreateGridIndices()
+        {
+            var indices = new uint[DrawVertexCount];
+            var writeIndex = 0;
+            for (var z = 0; z < CellCount; z++)
+            {
+                for (var x = 0; x < CellCount; x++)
+                {
+                    var v00 = (uint)(z * GridResolution + x);
+                    var v10 = v00 + 1;
+                    var v01 = v00 + GridResolution;
+                    var v11 = v01 + 1;
+                    indices[writeIndex++] = v00;
+                    indices[writeIndex++] = v01;
+                    indices[writeIndex++] = v10;
+                    indices[writeIndex++] = v10;
+                    indices[writeIndex++] = v01;
+                    indices[writeIndex++] = v11;
+                }
+            }
+            return indices;
+        }
+
         void OnEnable()
         {
             hasDispatched = false;
@@ -111,7 +159,7 @@ namespace CausticMeshDxr
 
             if (!runContinuously && hasDispatched && !changed)
             {
-                QueueProjectedTriangle();
+                QueueProjectedGrid();
                 return;
             }
 
@@ -126,7 +174,7 @@ namespace CausticMeshDxr
             lastReceiverTransform = receiverTransform;
             lastIncidentDirection = incidentDirection;
             hasDispatched = true;
-            QueueProjectedTriangle();
+            QueueProjectedGrid();
         }
 
         bool EnsureInitialized()
@@ -140,21 +188,18 @@ namespace CausticMeshDxr
                 enabled = false;
                 return false;
             }
-
             if (!SystemInfo.supportsInlineRayTracing)
             {
                 Debug.LogError("Caustic Ray Query requires inline ray tracing (DXR Tier 1.1).", this);
                 enabled = false;
                 return false;
             }
-
             if (receiver == null || directionalLight == null || rayQueryShader == null || projectedTriangleShader == null)
             {
                 Debug.LogError("Receiver, Directional Light, Ray Query Shader, and Projected Triangle Shader must be assigned.", this);
                 enabled = false;
                 return false;
             }
-
             if (directionalLight.type != LightType.Directional)
             {
                 Debug.LogError("The assigned light must be a Directional Light.", this);
@@ -178,7 +223,6 @@ namespace CausticMeshDxr
                 layerMask = ~0,
             };
             accelerationStructure = new RayTracingAccelerationStructure(settings);
-
             var instanceConfig = new RayTracingMeshInstanceConfig(mesh, 0, null)
             {
                 subMeshFlags = RayTracingSubMeshFlags.Enabled | RayTracingSubMeshFlags.ClosestHitOnly,
@@ -192,31 +236,33 @@ namespace CausticMeshDxr
                 ReceiverInstanceId);
             accelerationStructure.Build();
 
-            hitBuffer = new GraphicsBuffer(
-                GraphicsBuffer.Target.Structured,
-                VertexCount,
-                Marshal.SizeOf<RayHit>());
+            sourceVertexBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, VertexCount, Marshal.SizeOf<Vector3>());
+            sourceVertexBuffer.SetData(LocalVertices);
+            sourceIndexBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, DrawVertexCount, sizeof(uint));
+            sourceIndexBuffer.SetData(SourceIndices);
+            hitBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, VertexCount, Marshal.SizeOf<RayHit>());
             triangleResultBuffer = new GraphicsBuffer(
                 GraphicsBuffer.Target.Structured,
-                1,
+                TriangleCount,
                 Marshal.SizeOf<TriangleResult>());
+
             projectedTriangleMaterial = new Material(projectedTriangleShader)
             {
                 hideFlags = HideFlags.HideAndDontSave,
             };
+            projectedTriangleMaterial.SetBuffer(SourceIndicesId, sourceIndexBuffer);
             projectedTriangleMaterial.SetBuffer(HitsId, hitBuffer);
-            projectedTriangleMaterial.SetBuffer(TriangleResultId, triangleResultBuffer);
+            projectedTriangleMaterial.SetBuffer(TriangleResultsId, triangleResultBuffer);
 
             traceKernel = rayQueryShader.FindKernel("TraceVertices");
-            buildTriangleKernel = rayQueryShader.FindKernel("BuildTriangle");
+            buildTrianglesKernel = rayQueryShader.FindKernel("BuildTriangles");
             initialized = true;
-
             lastSourceTransform = transform.localToWorldMatrix;
             lastReceiverTransform = receiver.transform.localToWorldMatrix;
             lastIncidentDirection = directionalLight.transform.forward.normalized;
 
             Debug.Log(
-                $"Caustic Ray Query initialized with {SystemInfo.graphicsDeviceName}; inline ray tracing is supported.",
+                $"Caustic grid initialized with {VertexCount} shared vertices and {TriangleCount} triangles on {SystemInfo.graphicsDeviceName}.",
                 this);
             return true;
         }
@@ -224,23 +270,27 @@ namespace CausticMeshDxr
         void Dispatch(Vector3 incidentDirection)
         {
             rayQueryShader.SetRayTracingAccelerationStructure(traceKernel, AccelerationStructureId, accelerationStructure);
+            rayQueryShader.SetBuffer(traceKernel, SourceVerticesId, sourceVertexBuffer);
             rayQueryShader.SetBuffer(traceKernel, HitsId, hitBuffer);
-            rayQueryShader.SetBuffer(buildTriangleKernel, HitsId, hitBuffer);
-            rayQueryShader.SetBuffer(buildTriangleKernel, TriangleResultId, triangleResultBuffer);
+            rayQueryShader.SetBuffer(buildTrianglesKernel, SourceVerticesId, sourceVertexBuffer);
+            rayQueryShader.SetBuffer(buildTrianglesKernel, SourceIndicesId, sourceIndexBuffer);
+            rayQueryShader.SetBuffer(buildTrianglesKernel, HitsId, hitBuffer);
+            rayQueryShader.SetBuffer(buildTrianglesKernel, TriangleResultsId, triangleResultBuffer);
             rayQueryShader.SetMatrix(SourceLocalToWorldId, transform.localToWorldMatrix);
             rayQueryShader.SetVector(SourceNormalId, transform.up.normalized);
             rayQueryShader.SetFloat(SourceSizeId, sourceSize);
+            rayQueryShader.SetInt(VertexCountId, VertexCount);
+            rayQueryShader.SetInt(TriangleCountId, TriangleCount);
             rayQueryShader.SetVector(IncidentDirectionId, incidentDirection);
             rayQueryShader.SetFloat(EtaId, 1f / transmittedRefractiveIndex);
             rayQueryShader.SetFloat(RayTMinId, rayTMin);
             rayQueryShader.SetFloat(RayTMaxId, rayTMax);
             rayQueryShader.SetFloat(MinReceiverAreaId, minReceiverArea);
-            rayQueryShader.Dispatch(traceKernel, 1, 1, 1);
-            rayQueryShader.Dispatch(buildTriangleKernel, 1, 1, 1);
+            rayQueryShader.Dispatch(traceKernel, DivideRoundUp(VertexCount, ComputeThreadCount), 1, 1);
+            rayQueryShader.Dispatch(buildTrianglesKernel, DivideRoundUp(TriangleCount, ComputeThreadCount), 1, 1);
 
             projectedTriangleMaterial.SetColor(ColorId, causticColor);
             projectedTriangleMaterial.SetFloat(IntensityScaleId, intensityScale);
-
             if (readbackPendingCount != 0)
                 return;
 
@@ -255,7 +305,6 @@ namespace CausticMeshDxr
                     Debug.LogError("Failed to read Ray Query results from the GPU.", this);
                     return;
                 }
-
                 ValidateHits(request.GetData<RayHit>(), incidentDirection);
             });
             AsyncGPUReadback.Request(triangleResultBuffer, request =>
@@ -268,9 +317,13 @@ namespace CausticMeshDxr
                     Debug.LogError("Failed to read caustic triangle results from the GPU.", this);
                     return;
                 }
-
-                ValidateTriangle(request.GetData<TriangleResult>()[0], incidentDirection);
+                ValidateTriangles(request.GetData<TriangleResult>(), incidentDirection);
             });
+        }
+
+        static int DivideRoundUp(int value, int divisor)
+        {
+            return (value + divisor - 1) / divisor;
         }
 
         void CompleteReadback()
@@ -279,85 +332,112 @@ namespace CausticMeshDxr
                 readbackPendingCount = Mathf.Max(0, readbackPendingCount - 1);
         }
 
-        void ValidateHits(Unity.Collections.NativeArray<RayHit> hits, Vector3 incidentDirection)
+        void ValidateHits(NativeArray<RayHit> hits, Vector3 incidentDirection)
         {
-            var sourceNormal = transform.up.normalized;
-            var refractedDirection = Refract(incidentDirection, sourceNormal, 1f / transmittedRefractiveIndex);
-            if (refractedDirection == Vector3.zero)
-            {
-                Debug.LogError("The test ray produced total internal reflection.", this);
-                return;
-            }
-
+            var refractedDirection = Refract(
+                incidentDirection,
+                transform.up.normalized,
+                1f / transmittedRefractiveIndex);
             var receiverPlane = new Plane(receiver.transform.forward, receiver.transform.position);
-            var allValid = true;
-            var sameReceiver = true;
-            var details = string.Empty;
+            var primitiveIds = new HashSet<uint>();
+            var validCount = 0;
+            var maxError = 0f;
 
             for (var i = 0; i < VertexCount; i++)
             {
                 var origin = GetSourceVertexWorld(i);
-                var expectedValid = receiverPlane.Raycast(new Ray(origin, refractedDirection), out var expectedDistance)
+                var expectedDistance = 0f;
+                var expectedValid = refractedDirection != Vector3.zero
+                    && receiverPlane.Raycast(new Ray(origin, refractedDirection), out expectedDistance)
                     && expectedDistance >= rayTMin
                     && expectedDistance <= rayTMax;
-                var expectedPosition = origin + refractedDirection * expectedDistance;
                 var hit = hits[i];
-                var error = expectedValid && hit.valid != 0
-                    ? Vector3.Distance(expectedPosition, hit.position)
-                    : float.PositiveInfinity;
+                if (!expectedValid || hit.valid == 0 || hit.instanceId != ReceiverInstanceId)
+                    continue;
 
-                allValid &= expectedValid && hit.valid != 0 && error <= planeHitTolerance;
-                sameReceiver &= hit.valid != 0 && hit.instanceId == ReceiverInstanceId;
-                details += $"\n  v{i}: valid={hit.valid}, instance={hit.instanceId}, primitive={hit.primitiveIndex}, "
-                    + $"t={hit.distance:F6}, error={error:E3}";
+                var expectedPosition = origin + refractedDirection * expectedDistance;
+                maxError = Mathf.Max(maxError, Vector3.Distance(expectedPosition, hit.position));
+                primitiveIds.Add(hit.primitiveIndex);
+                validCount++;
             }
 
-            if (allValid && sameReceiver)
-                Debug.Log($"Caustic Ray Query validation passed.{details}", this);
+            if (validCount == VertexCount && maxError <= planeHitTolerance)
+            {
+                Debug.Log(
+                    $"Caustic grid Ray Query validation passed: {validCount}/{VertexCount} vertices, "
+                    + $"{primitiveIds.Count} receiver primitives, max error={maxError:E3}.",
+                    this);
+            }
             else
-                Debug.LogError($"Caustic Ray Query validation failed.{details}", this);
+            {
+                Debug.LogError(
+                    $"Caustic grid Ray Query validation failed: {validCount}/{VertexCount} vertices, max error={maxError:E3}.",
+                    this);
+            }
         }
 
-        void ValidateTriangle(TriangleResult result, Vector3 incidentDirection)
+        void ValidateTriangles(NativeArray<TriangleResult> results, Vector3 incidentDirection)
         {
-            var x0 = GetSourceVertexWorld(0);
-            var x1 = GetSourceVertexWorld(1);
-            var x2 = GetSourceVertexWorld(2);
-            var expectedIncidentArea = 0.5f * Mathf.Max(
-                0,
-                Vector3.Dot(-incidentDirection.normalized, Vector3.Cross(x1 - x0, x2 - x0)));
-
             var refractedDirection = Refract(
                 incidentDirection,
                 transform.up.normalized,
                 1f / transmittedRefractiveIndex);
             var receiverPlane = new Plane(receiver.transform.forward, receiver.transform.position);
             var projected = new Vector3[VertexCount];
-            var expectedValid = refractedDirection != Vector3.zero;
-            for (var i = 0; i < VertexCount && expectedValid; i++)
+            var projectedValid = refractedDirection != Vector3.zero;
+            for (var i = 0; i < VertexCount && projectedValid; i++)
             {
                 var origin = GetSourceVertexWorld(i);
-                expectedValid &= receiverPlane.Raycast(new Ray(origin, refractedDirection), out var distance)
+                projectedValid &= receiverPlane.Raycast(new Ray(origin, refractedDirection), out var distance)
                     && distance >= rayTMin
                     && distance <= rayTMax;
                 projected[i] = origin + refractedDirection * distance;
             }
 
-            var expectedReceiverArea = expectedValid
-                ? 0.5f * Vector3.Cross(projected[1] - projected[0], projected[2] - projected[0]).magnitude
-                : 0;
-            var expectedIntensity = expectedIncidentArea / Mathf.Max(expectedReceiverArea, minReceiverArea);
-            var passed = expectedValid
-                && result.valid != 0
-                && RelativeError(result.incidentArea, expectedIncidentArea) <= scalarRelativeTolerance
-                && RelativeError(result.receiverArea, expectedReceiverArea) <= scalarRelativeTolerance
-                && RelativeError(result.intensity, expectedIntensity) <= scalarRelativeTolerance;
-            var details = $"Ai={result.incidentArea:F6}, Ar={result.receiverArea:F6}, C={result.intensity:F6}";
+            var validCount = 0;
+            var minIntensity = float.PositiveInfinity;
+            var maxIntensity = float.NegativeInfinity;
+            for (var triangleIndex = 0; triangleIndex < TriangleCount; triangleIndex++)
+            {
+                var indexOffset = triangleIndex * 3;
+                var i0 = (int)SourceIndices[indexOffset];
+                var i1 = (int)SourceIndices[indexOffset + 1];
+                var i2 = (int)SourceIndices[indexOffset + 2];
+                var x0 = GetSourceVertexWorld(i0);
+                var x1 = GetSourceVertexWorld(i1);
+                var x2 = GetSourceVertexWorld(i2);
+                var expectedIncidentArea = 0.5f * Mathf.Max(
+                    0,
+                    Vector3.Dot(-incidentDirection.normalized, Vector3.Cross(x1 - x0, x2 - x0)));
+                var expectedReceiverArea = projectedValid
+                    ? 0.5f * Vector3.Cross(projected[i1] - projected[i0], projected[i2] - projected[i0]).magnitude
+                    : 0;
+                var expectedIntensity = expectedIncidentArea / Mathf.Max(expectedReceiverArea, minReceiverArea);
+                var result = results[triangleIndex];
+                var valid = projectedValid
+                    && result.valid != 0
+                    && RelativeError(result.incidentArea, expectedIncidentArea) <= scalarRelativeTolerance
+                    && RelativeError(result.receiverArea, expectedReceiverArea) <= scalarRelativeTolerance
+                    && RelativeError(result.intensity, expectedIntensity) <= scalarRelativeTolerance;
+                if (!valid)
+                    continue;
 
-            if (passed)
-                Debug.Log($"Caustic triangle density validation passed: {details}", this);
+                validCount++;
+                minIntensity = Mathf.Min(minIntensity, result.intensity);
+                maxIntensity = Mathf.Max(maxIntensity, result.intensity);
+            }
+
+            if (validCount == TriangleCount)
+            {
+                Debug.Log(
+                    $"Caustic grid density validation passed: {validCount}/{TriangleCount} triangles, "
+                    + $"C={minIntensity:F6}..{maxIntensity:F6}.",
+                    this);
+            }
             else
-                Debug.LogError($"Caustic triangle density validation failed: {details}", this);
+            {
+                Debug.LogError($"Caustic grid density validation failed: {validCount}/{TriangleCount} triangles.", this);
+            }
         }
 
         static float RelativeError(float actual, float expected)
@@ -370,7 +450,7 @@ namespace CausticMeshDxr
             return transform.TransformPoint(LocalVertices[index] * sourceSize);
         }
 
-        void QueueProjectedTriangle()
+        void QueueProjectedGrid()
         {
             if (!initialized || projectedTriangleMaterial == null)
                 return;
@@ -379,7 +459,7 @@ namespace CausticMeshDxr
                 projectedTriangleMaterial,
                 receiver.bounds,
                 MeshTopology.Triangles,
-                VertexCount,
+                DrawVertexCount,
                 1,
                 null,
                 null,
@@ -402,12 +482,15 @@ namespace CausticMeshDxr
         void OnDrawGizmos()
         {
             Gizmos.color = Color.cyan;
-            var v0 = GetSourceVertexWorld(0);
-            var v1 = GetSourceVertexWorld(1);
-            var v2 = GetSourceVertexWorld(2);
-            Gizmos.DrawLine(v0, v1);
-            Gizmos.DrawLine(v1, v2);
-            Gizmos.DrawLine(v2, v0);
+            for (var i = 0; i < SourceIndices.Length; i += 3)
+            {
+                var v0 = GetSourceVertexWorld((int)SourceIndices[i]);
+                var v1 = GetSourceVertexWorld((int)SourceIndices[i + 1]);
+                var v2 = GetSourceVertexWorld((int)SourceIndices[i + 2]);
+                Gizmos.DrawLine(v0, v1);
+                Gizmos.DrawLine(v1, v2);
+                Gizmos.DrawLine(v2, v0);
+            }
         }
 
         void OnDisable()
@@ -415,6 +498,10 @@ namespace CausticMeshDxr
             initialized = false;
             readbackPendingCount = 0;
             receiverHandle = -1;
+            sourceVertexBuffer?.Dispose();
+            sourceVertexBuffer = null;
+            sourceIndexBuffer?.Dispose();
+            sourceIndexBuffer = null;
             hitBuffer?.Dispose();
             hitBuffer = null;
             triangleResultBuffer?.Dispose();

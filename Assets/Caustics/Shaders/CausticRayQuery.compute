@@ -1,5 +1,5 @@
 #pragma kernel TraceVertices
-#pragma kernel BuildTriangle
+#pragma kernel BuildTriangles
 #pragma require inlineraytracing
 
 #include "UnityRayQuery.cginc"
@@ -16,8 +16,6 @@ struct RayHit
     uint padding;
 };
 
-RWStructuredBuffer<RayHit> _Hits;
-
 struct TriangleResult
 {
     float intensity;
@@ -26,35 +24,37 @@ struct TriangleResult
     uint valid;
 };
 
-RWStructuredBuffer<TriangleResult> _TriangleResult;
+StructuredBuffer<float3> _SourceVertices;
+StructuredBuffer<uint> _SourceIndices;
+RWStructuredBuffer<RayHit> _Hits;
+RWStructuredBuffer<TriangleResult> _TriangleResults;
 
 float4x4 _SourceLocalToWorld;
 float3 _SourceNormal;
 float _SourceSize;
+uint _VertexCount;
+uint _TriangleCount;
 float3 _IncidentDirection;
 float _Eta;
 float _RayTMin;
 float _RayTMax;
 float _MinReceiverArea;
 
-float3 GetLocalVertex(uint index)
+float3 GetSourceVertexWorld(uint index)
 {
-    if (index == 0)
-        return float3(-0.5, 0, -0.5);
-    if (index == 1)
-        return float3(-0.5, 0, 0.5);
-    return float3(0.5, 0, -0.5);
+    return mul(_SourceLocalToWorld, float4(_SourceVertices[index] * _SourceSize, 1)).xyz;
 }
 
-[numthreads(3, 1, 1)]
+[numthreads(64, 1, 1)]
 void TraceVertices(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
     const uint index = dispatchThreadId.x;
-    RayHit result = (RayHit)0;
+    if (index >= _VertexCount)
+        return;
 
-    const float3 origin = mul(_SourceLocalToWorld, float4(GetLocalVertex(index) * _SourceSize, 1)).xyz;
-    const float3 normal = normalize(_SourceNormal);
-    const float3 direction = refract(normalize(_IncidentDirection), normal, _Eta);
+    RayHit result = (RayHit)0;
+    const float3 origin = GetSourceVertexWorld(index);
+    const float3 direction = refract(normalize(_IncidentDirection), normalize(_SourceNormal), _Eta);
 
     if (dot(direction, direction) > 0)
     {
@@ -84,20 +84,28 @@ void TraceVertices(uint3 dispatchThreadId : SV_DispatchThreadID)
     _Hits[index] = result;
 }
 
-[numthreads(1, 1, 1)]
-void BuildTriangle(uint3 dispatchThreadId : SV_DispatchThreadID)
+[numthreads(64, 1, 1)]
+void BuildTriangles(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
+    const uint triangleIndex = dispatchThreadId.x;
+    if (triangleIndex >= _TriangleCount)
+        return;
+
+    const uint indexOffset = triangleIndex * 3;
+    const uint i0 = _SourceIndices[indexOffset];
+    const uint i1 = _SourceIndices[indexOffset + 1];
+    const uint i2 = _SourceIndices[indexOffset + 2];
+    const RayHit h0 = _Hits[i0];
+    const RayHit h1 = _Hits[i1];
+    const RayHit h2 = _Hits[i2];
     TriangleResult result = (TriangleResult)0;
-    const RayHit h0 = _Hits[0];
-    const RayHit h1 = _Hits[1];
-    const RayHit h2 = _Hits[2];
 
     if (h0.valid != 0 && h1.valid != 0 && h2.valid != 0
         && h0.instanceId == h1.instanceId && h1.instanceId == h2.instanceId)
     {
-        const float3 x0 = mul(_SourceLocalToWorld, float4(GetLocalVertex(0) * _SourceSize, 1)).xyz;
-        const float3 x1 = mul(_SourceLocalToWorld, float4(GetLocalVertex(1) * _SourceSize, 1)).xyz;
-        const float3 x2 = mul(_SourceLocalToWorld, float4(GetLocalVertex(2) * _SourceSize, 1)).xyz;
+        const float3 x0 = GetSourceVertexWorld(i0);
+        const float3 x1 = GetSourceVertexWorld(i1);
+        const float3 x2 = GetSourceVertexWorld(i2);
         const float3 areaVector = cross(x1 - x0, x2 - x0);
         result.incidentArea = 0.5 * max(0, dot(-normalize(_IncidentDirection), areaVector));
         result.receiverArea = 0.5 * length(cross(h1.position - h0.position, h2.position - h0.position));
@@ -105,5 +113,5 @@ void BuildTriangle(uint3 dispatchThreadId : SV_DispatchThreadID)
         result.valid = result.incidentArea > 0 && result.receiverArea > 0;
     }
 
-    _TriangleResult[0] = result;
+    _TriangleResults[triangleIndex] = result;
 }
