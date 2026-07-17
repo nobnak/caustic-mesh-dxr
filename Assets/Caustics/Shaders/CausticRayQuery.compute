@@ -24,13 +24,19 @@ struct TriangleResult
     uint valid;
 };
 
-StructuredBuffer<float3> _SourceVertices;
+struct SourceVertex
+{
+    float3 position;
+    float3 normal;
+};
+
+StructuredBuffer<SourceVertex> _SourceVertices;
 StructuredBuffer<uint> _SourceIndices;
 RWStructuredBuffer<RayHit> _Hits;
 RWStructuredBuffer<TriangleResult> _TriangleResults;
 
 float4x4 _SourceLocalToWorld;
-float3 _SourceNormal;
+float4x4 _SourceNormalToWorld;
 float _SourceSize;
 uint _VertexCount;
 uint _TriangleCount;
@@ -42,7 +48,12 @@ float _MinReceiverArea;
 
 float3 GetSourceVertexWorld(uint index)
 {
-    return mul(_SourceLocalToWorld, float4(_SourceVertices[index] * _SourceSize, 1)).xyz;
+    return mul(_SourceLocalToWorld, float4(_SourceVertices[index].position * _SourceSize, 1)).xyz;
+}
+
+float3 GetSourceNormalWorld(uint index)
+{
+    return normalize(mul((float3x3)_SourceNormalToWorld, _SourceVertices[index].normal));
 }
 
 [numthreads(64, 1, 1)]
@@ -54,7 +65,7 @@ void TraceVertices(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     RayHit result = (RayHit)0;
     const float3 origin = GetSourceVertexWorld(index);
-    const float3 direction = refract(normalize(_IncidentDirection), normalize(_SourceNormal), _Eta);
+    const float3 direction = refract(normalize(_IncidentDirection), GetSourceNormalWorld(index), _Eta);
 
     if (dot(direction, direction) > 0)
     {
