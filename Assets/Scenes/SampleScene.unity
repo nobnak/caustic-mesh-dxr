@@ -266,7 +266,7 @@ GameObject:
   m_Component:
   - component: {fileID: 406132100}
   m_Layer: 0
-  m_Name: Surface
+  m_Name: Input Surface
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -476,7 +476,7 @@ GameObject:
   - component: {fileID: 1052510686}
   - component: {fileID: 1052510685}
   m_Layer: 0
-  m_Name: Floor
+  m_Name: Receive Floor
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -583,5 +583,5 @@ SceneRoots:
   - {fileID: 330585546}
   - {fileID: 410087041}
   - {fileID: 832575519}
-  - {fileID: 1052510688}
   - {fileID: 406132100}
+  - {fileID: 1052510688}
