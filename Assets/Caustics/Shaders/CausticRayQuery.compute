@@ -1,0 +1,109 @@
+#pragma kernel TraceVertices
+#pragma kernel BuildTriangle
+#pragma require inlineraytracing
+
+#include "UnityRayQuery.cginc"
+
+RaytracingAccelerationStructure _AccelerationStructure;
+
+struct RayHit
+{
+    float3 position;
+    float distance;
+    uint instanceId;
+    uint primitiveIndex;
+    uint valid;
+    uint padding;
+};
+
+RWStructuredBuffer<RayHit> _Hits;
+
+struct TriangleResult
+{
+    float intensity;
+    float incidentArea;
+    float receiverArea;
+    uint valid;
+};
+
+RWStructuredBuffer<TriangleResult> _TriangleResult;
+
+float4x4 _SourceLocalToWorld;
+float3 _SourceNormal;
+float _SourceSize;
+float3 _IncidentDirection;
+float _Eta;
+float _RayTMin;
+float _RayTMax;
+float _MinReceiverArea;
+
+float3 GetLocalVertex(uint index)
+{
+    if (index == 0)
+        return float3(-0.5, 0, -0.5);
+    if (index == 1)
+        return float3(-0.5, 0, 0.5);
+    return float3(0.5, 0, -0.5);
+}
+
+[numthreads(3, 1, 1)]
+void TraceVertices(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    const uint index = dispatchThreadId.x;
+    RayHit result = (RayHit)0;
+
+    const float3 origin = mul(_SourceLocalToWorld, float4(GetLocalVertex(index) * _SourceSize, 1)).xyz;
+    const float3 normal = normalize(_SourceNormal);
+    const float3 direction = refract(normalize(_IncidentDirection), normal, _Eta);
+
+    if (dot(direction, direction) > 0)
+    {
+        RayDesc ray;
+        ray.Origin = origin;
+        ray.Direction = direction;
+        ray.TMin = _RayTMin;
+        ray.TMax = _RayTMax;
+
+        const uint rayFlags = RAY_FLAG_FORCE_OPAQUE;
+        UnityRayQuery<rayFlags> rayQuery;
+        rayQuery.TraceRayInline(_AccelerationStructure, rayFlags, 1, ray);
+        while (rayQuery.Proceed())
+        {
+        }
+
+        if (rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+        {
+            result.distance = rayQuery.CommittedRayT();
+            result.position = origin + direction * result.distance;
+            result.instanceId = rayQuery.CommittedInstanceID();
+            result.primitiveIndex = rayQuery.CommittedPrimitiveIndex();
+            result.valid = 1;
+        }
+    }
+
+    _Hits[index] = result;
+}
+
+[numthreads(1, 1, 1)]
+void BuildTriangle(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    TriangleResult result = (TriangleResult)0;
+    const RayHit h0 = _Hits[0];
+    const RayHit h1 = _Hits[1];
+    const RayHit h2 = _Hits[2];
+
+    if (h0.valid != 0 && h1.valid != 0 && h2.valid != 0
+        && h0.instanceId == h1.instanceId && h1.instanceId == h2.instanceId)
+    {
+        const float3 x0 = mul(_SourceLocalToWorld, float4(GetLocalVertex(0) * _SourceSize, 1)).xyz;
+        const float3 x1 = mul(_SourceLocalToWorld, float4(GetLocalVertex(1) * _SourceSize, 1)).xyz;
+        const float3 x2 = mul(_SourceLocalToWorld, float4(GetLocalVertex(2) * _SourceSize, 1)).xyz;
+        const float3 areaVector = cross(x1 - x0, x2 - x0);
+        result.incidentArea = 0.5 * max(0, dot(-normalize(_IncidentDirection), areaVector));
+        result.receiverArea = 0.5 * length(cross(h1.position - h0.position, h2.position - h0.position));
+        result.intensity = result.incidentArea / max(result.receiverArea, _MinReceiverArea);
+        result.valid = result.incidentArea > 0 && result.receiverArea > 0;
+    }
+
+    _TriangleResult[0] = result;
+}

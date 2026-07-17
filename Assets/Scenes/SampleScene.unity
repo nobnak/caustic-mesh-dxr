@@ -265,6 +265,7 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 406132100}
+  - component: {fileID: 406132101}
   m_Layer: 0
   m_Name: Input Surface
   m_TagString: Untagged
@@ -287,6 +288,32 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &406132101
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 406132099}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 197a51e4281542509b55e1a2cf727b72, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  receiver: {fileID: 1052510686}
+  directionalLight: {fileID: 410087040}
+  rayQueryShader: {fileID: 7200000, guid: 80078622762d442ca7f3f9351e739136, type: 3}
+  projectedTriangleShader: {fileID: 4800000, guid: 561de9e0317c4eeeb34a3a1b9914bf02, type: 3}
+  sourceSize: 2
+  transmittedRefractiveIndex: 1.333
+  rayTMin: 0.001
+  rayTMax: 100
+  minReceiverArea: 0.00001
+  causticColor: {r: 1, g: 0.7, b: 0.1, a: 1}
+  intensityScale: 0.25
+  runContinuously: 0
+  planeHitTolerance: 0.001
+  scalarRelativeTolerance: 0.0001
 --- !u!1 &410087039
 GameObject:
   m_ObjectHideFlags: 0
