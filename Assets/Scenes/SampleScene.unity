@@ -205,8 +205,8 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 330585543}
   serializedVersion: 2
-  m_LocalRotation: {x: 0.15658815, y: -0.057003587, z: 0.00905304, w: 0.98597604}
-  m_LocalPosition: {x: 0.82, y: 0.15, z: -8.86}
+  m_LocalRotation: {x: 0.18112804, y: -0.12940085, z: 0.024048682, w: 0.97461265}
+  m_LocalPosition: {x: -0.67856145, y: 0.9149445, z: -6.5655284}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -304,14 +304,15 @@ MonoBehaviour:
   directionalLight: {fileID: 410087040}
   rayQueryShader: {fileID: 7200000, guid: 80078622762d442ca7f3f9351e739136, type: 3}
   projectedTriangleShader: {fileID: 4800000, guid: 561de9e0317c4eeeb34a3a1b9914bf02, type: 3}
+  sourceGridOutlineShader: {fileID: 4800000, guid: d5d9f9c1853c47a1b7c45a0f7be6d201, type: 3}
   sourceSize: {x: 10, y: 10}
-  cellSize: 0.03
+  cellSize: 0.1
   waveAmplitude: 0.056
   waveLength: 1
   waveCenter: {x: 0, y: 0}
   waveCenterSmoothing: 0.05
   animateWave: 0
-  waveSpeed: 1
+  waveSpeed: 0.3
   wavePhase: 0
   transmittedRefractiveIndex: 1.333
   rayTMin: 0.001
@@ -319,6 +320,8 @@ MonoBehaviour:
   minReceiverArea: 0.00001
   causticColor: {r: 1, g: 0.7, b: 0.1, a: 1}
   intensityScale: 0.25
+  showSourceGrid: 1
+  sourceGridColor: {r: 0, g: 1, b: 1, a: 1}
   runContinuously: 0
   planeHitTolerance: 0.001
   scalarRelativeTolerance: 0.001

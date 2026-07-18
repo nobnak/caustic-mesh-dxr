@@ -6,6 +6,7 @@ using UnityEngine.Rendering;
 
 namespace CausticMeshDxr
 {
+    [ExecuteAlways]
     public sealed class CausticRayQueryTest : MonoBehaviour
     {
         const int ComputeThreadCount = 64;
@@ -16,6 +17,7 @@ namespace CausticMeshDxr
         static readonly int AccelerationStructureId = Shader.PropertyToID("_AccelerationStructure");
         static readonly int SourceVerticesId = Shader.PropertyToID("_SourceVertices");
         static readonly int SourceIndicesId = Shader.PropertyToID("_SourceIndices");
+        static readonly int SourceLineIndicesId = Shader.PropertyToID("_SourceLineIndices");
         static readonly int HitsId = Shader.PropertyToID("_Hits");
         static readonly int TriangleResultsId = Shader.PropertyToID("_TriangleResults");
         static readonly int SourceLocalToWorldId = Shader.PropertyToID("_SourceLocalToWorld");
@@ -35,6 +37,7 @@ namespace CausticMeshDxr
         [SerializeField] Light directionalLight;
         [SerializeField] ComputeShader rayQueryShader;
         [SerializeField] Shader projectedTriangleShader;
+        [SerializeField] Shader sourceGridOutlineShader;
 
         [Header("Input Surface")]
         [SerializeField] Vector2 sourceSize = new(2, 2);
@@ -56,6 +59,8 @@ namespace CausticMeshDxr
         [Header("Display")]
         [SerializeField] Color causticColor = new(1, 0.7f, 0.1f, 1);
         [SerializeField, Min(0)] float intensityScale = 0.25f;
+        [SerializeField] bool showSourceGrid = true;
+        [SerializeField] Color sourceGridColor = Color.cyan;
 
         [Header("Validation")]
         [SerializeField] bool runContinuously;
@@ -66,17 +71,22 @@ namespace CausticMeshDxr
         RayTracingAccelerationStructure accelerationStructure;
         GraphicsBuffer sourceVertexBuffer;
         GraphicsBuffer sourceIndexBuffer;
+        GraphicsBuffer sourceLineIndexBuffer;
         GraphicsBuffer hitBuffer;
         GraphicsBuffer triangleResultBuffer;
         SourceVertex[] sourceVertices;
         uint[] sourceIndices;
+        uint[] sourceLineIndices;
         int cellCountX;
         int cellCountZ;
         int vertexCount;
         int triangleCount;
         int drawVertexCount;
+        int lineVertexCount;
         Vector2 actualSourceSize;
         Material projectedTriangleMaterial;
+        Material sourceGridOutlineMaterial;
+        CommandBuffer sourceGridOutlineCommandBuffer;
         int receiverHandle = -1;
         int traceKernel;
         int buildTrianglesKernel;
@@ -128,6 +138,8 @@ namespace CausticMeshDxr
             drawVertexCount = triangleCount * 3;
             sourceVertices = new SourceVertex[vertexCount];
             sourceIndices = CreateGridIndices();
+            sourceLineIndices = CreateGridLineIndices();
+            lineVertexCount = sourceLineIndices.Length;
         }
 
         bool GridTopologyChanged()
@@ -197,10 +209,50 @@ namespace CausticMeshDxr
             return indices;
         }
 
+        uint[] CreateGridLineIndices()
+        {
+            var horizontalSegmentCount = cellCountX * (cellCountZ + 1);
+            var verticalSegmentCount = (cellCountX + 1) * cellCountZ;
+            var diagonalSegmentCount = cellCountX * cellCountZ;
+            var indices = new uint[(horizontalSegmentCount + verticalSegmentCount + diagonalSegmentCount) * 2];
+            var writeIndex = 0;
+
+            for (var z = 0; z <= cellCountZ; z++)
+            {
+                for (var x = 0; x < cellCountX; x++)
+                {
+                    var start = (uint)(z * (cellCountX + 1) + x);
+                    indices[writeIndex++] = start;
+                    indices[writeIndex++] = start + 1;
+                }
+            }
+            for (var z = 0; z < cellCountZ; z++)
+            {
+                for (var x = 0; x <= cellCountX; x++)
+                {
+                    var start = (uint)(z * (cellCountX + 1) + x);
+                    indices[writeIndex++] = start;
+                    indices[writeIndex++] = start + (uint)(cellCountX + 1);
+                }
+            }
+            for (var z = 0; z < cellCountZ; z++)
+            {
+                for (var x = 0; x < cellCountX; x++)
+                {
+                    var upperRight = (uint)(z * (cellCountX + 1) + x + 1);
+                    indices[writeIndex++] = upperRight;
+                    indices[writeIndex++] = upperRight + (uint)cellCountX;
+                }
+            }
+            return indices;
+        }
+
         void OnEnable()
         {
             RebuildGridData();
             UpdateSourceVertices();
+            EnsureSourceGridOutlineResources();
+            RenderPipelineManager.endCameraRendering += DrawSourceGridInSceneView;
             hasDispatched = false;
         }
 
@@ -219,6 +271,12 @@ namespace CausticMeshDxr
 
         void Update()
         {
+            if (!Application.isPlaying)
+            {
+                EnsureSourceGridOutlineResources();
+                return;
+            }
+
             if (!EnsureInitialized())
                 return;
 
@@ -232,6 +290,7 @@ namespace CausticMeshDxr
             if (!runContinuously && !animateWave && hasDispatched && !changed)
             {
                 QueueProjectedGrid();
+                QueueSourceGridOutline();
                 return;
             }
 
@@ -247,6 +306,7 @@ namespace CausticMeshDxr
             lastIncidentDirection = incidentDirection;
             hasDispatched = true;
             QueueProjectedGrid();
+            QueueSourceGridOutline();
         }
 
         bool EnsureInitialized()
@@ -309,10 +369,14 @@ namespace CausticMeshDxr
             accelerationStructure.Build();
 
             UpdateSourceVertices();
-            sourceVertexBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertexCount, Marshal.SizeOf<SourceVertex>());
+            sourceVertexBuffer ??= new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured,
+                vertexCount,
+                Marshal.SizeOf<SourceVertex>());
             sourceVertexBuffer.SetData(sourceVertices);
             sourceIndexBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, drawVertexCount, sizeof(uint));
             sourceIndexBuffer.SetData(sourceIndices);
+            EnsureSourceGridOutlineResources();
             hitBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertexCount, Marshal.SizeOf<RayHit>());
             triangleResultBuffer = new GraphicsBuffer(
                 GraphicsBuffer.Target.Structured,
@@ -636,6 +700,95 @@ namespace CausticMeshDxr
                 gameObject.layer);
         }
 
+        void QueueSourceGridOutline()
+        {
+            if (!showSourceGrid || !initialized || sourceGridOutlineMaterial == null)
+                return;
+
+            sourceGridOutlineMaterial.SetMatrix(SourceLocalToWorldId, transform.localToWorldMatrix);
+            sourceGridOutlineMaterial.SetColor(ColorId, sourceGridColor);
+            var maxScale = Mathf.Max(
+                Mathf.Abs(transform.lossyScale.x),
+                Mathf.Abs(transform.lossyScale.y),
+                Mathf.Abs(transform.lossyScale.z));
+            var diameter = Mathf.Sqrt(
+                actualSourceSize.x * actualSourceSize.x
+                + actualSourceSize.y * actualSourceSize.y
+                + 4 * waveAmplitude * waveAmplitude) * maxScale;
+            var bounds = new Bounds(transform.TransformPoint(Vector3.zero), Vector3.one * Mathf.Max(0.01f, diameter));
+            Graphics.DrawProcedural(
+                sourceGridOutlineMaterial,
+                bounds,
+                MeshTopology.Lines,
+                lineVertexCount,
+                1,
+                null,
+                null,
+                ShadowCastingMode.Off,
+                false,
+                gameObject.layer);
+        }
+
+        void EnsureSourceGridOutlineResources()
+        {
+            if (!showSourceGrid || sourceGridOutlineShader == null || sourceVertices == null)
+                return;
+
+            if (sourceVertexBuffer == null || sourceVertexBuffer.count != vertexCount)
+            {
+                sourceVertexBuffer?.Dispose();
+                sourceVertexBuffer = new GraphicsBuffer(
+                    GraphicsBuffer.Target.Structured,
+                    vertexCount,
+                    Marshal.SizeOf<SourceVertex>());
+            }
+            sourceVertexBuffer.SetData(sourceVertices);
+
+            if (sourceLineIndexBuffer == null || sourceLineIndexBuffer.count != lineVertexCount)
+            {
+                sourceLineIndexBuffer?.Dispose();
+                sourceLineIndexBuffer = new GraphicsBuffer(
+                    GraphicsBuffer.Target.Structured,
+                    lineVertexCount,
+                    sizeof(uint));
+                sourceLineIndexBuffer.SetData(sourceLineIndices);
+            }
+            if (sourceGridOutlineMaterial == null)
+            {
+                sourceGridOutlineMaterial = new Material(sourceGridOutlineShader)
+                {
+                    hideFlags = HideFlags.HideAndDontSave,
+                };
+            }
+            sourceGridOutlineMaterial.SetBuffer(SourceVerticesId, sourceVertexBuffer);
+            sourceGridOutlineMaterial.SetBuffer(SourceLineIndicesId, sourceLineIndexBuffer);
+        }
+
+        void DrawSourceGridInSceneView(ScriptableRenderContext context, Camera camera)
+        {
+            if (!showSourceGrid || camera == null || camera.cameraType != CameraType.SceneView)
+                return;
+
+            EnsureSourceGridOutlineResources();
+            if (sourceGridOutlineMaterial == null)
+                return;
+
+            sourceGridOutlineMaterial.SetMatrix(SourceLocalToWorldId, transform.localToWorldMatrix);
+            sourceGridOutlineMaterial.SetColor(ColorId, sourceGridColor);
+            sourceGridOutlineCommandBuffer ??= new CommandBuffer
+            {
+                name = "Caustic Source Grid Outline",
+            };
+            sourceGridOutlineCommandBuffer.Clear();
+            sourceGridOutlineCommandBuffer.DrawProcedural(
+                Matrix4x4.identity,
+                sourceGridOutlineMaterial,
+                0,
+                MeshTopology.Lines,
+                lineVertexCount);
+            context.ExecuteCommandBuffer(sourceGridOutlineCommandBuffer);
+        }
+
         static Vector3 Refract(Vector3 incident, Vector3 normal, float eta)
         {
             incident.Normalize();
@@ -647,24 +800,9 @@ namespace CausticMeshDxr
             return (eta * incident - (eta * normalDotIncident + Mathf.Sqrt(discriminant)) * normal).normalized;
         }
 
-        void OnDrawGizmos()
-        {
-            if (sourceVertices == null)
-                UpdateSourceVertices();
-            Gizmos.color = Color.cyan;
-            for (var i = 0; i < sourceIndices.Length; i += 3)
-            {
-                var v0 = GetSourceVertexWorld((int)sourceIndices[i]);
-                var v1 = GetSourceVertexWorld((int)sourceIndices[i + 1]);
-                var v2 = GetSourceVertexWorld((int)sourceIndices[i + 2]);
-                Gizmos.DrawLine(v0, v1);
-                Gizmos.DrawLine(v1, v2);
-                Gizmos.DrawLine(v2, v0);
-            }
-        }
-
         void OnDisable()
         {
+            RenderPipelineManager.endCameraRendering -= DrawSourceGridInSceneView;
             ReleaseResources();
         }
 
@@ -680,6 +818,8 @@ namespace CausticMeshDxr
             sourceVertexBuffer = null;
             sourceIndexBuffer?.Dispose();
             sourceIndexBuffer = null;
+            sourceLineIndexBuffer?.Dispose();
+            sourceLineIndexBuffer = null;
             hitBuffer?.Dispose();
             hitBuffer = null;
             triangleResultBuffer?.Dispose();
@@ -694,6 +834,16 @@ namespace CausticMeshDxr
                     DestroyImmediate(projectedTriangleMaterial);
                 projectedTriangleMaterial = null;
             }
+            if (sourceGridOutlineMaterial != null)
+            {
+                if (Application.isPlaying)
+                    Destroy(sourceGridOutlineMaterial);
+                else
+                    DestroyImmediate(sourceGridOutlineMaterial);
+                sourceGridOutlineMaterial = null;
+            }
+            sourceGridOutlineCommandBuffer?.Release();
+            sourceGridOutlineCommandBuffer = null;
         }
     }
 }
