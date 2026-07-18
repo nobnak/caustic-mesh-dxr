@@ -1,5 +1,6 @@
 #pragma kernel TraceVertices
 #pragma kernel BuildTriangles
+#pragma kernel BuildRenderNormals
 #pragma require inlineraytracing
 
 #include "UnityRayQuery.cginc"
@@ -22,6 +23,8 @@ struct TriangleResult
     float incidentArea;
     float receiverArea;
     uint valid;
+    float3 renderNormal;
+    float padding;
 };
 
 struct SourceVertex
@@ -34,6 +37,9 @@ StructuredBuffer<SourceVertex> _SourceVertices;
 StructuredBuffer<uint> _SourceIndices;
 RWStructuredBuffer<RayHit> _Hits;
 RWStructuredBuffer<TriangleResult> _TriangleResults;
+StructuredBuffer<uint> _VertexTriangleOffsets;
+StructuredBuffer<uint> _VertexTriangleIndices;
+RWStructuredBuffer<float3> _RenderNormals;
 
 float4x4 _SourceLocalToWorld;
 float4x4 _SourceNormalToWorld;
@@ -121,7 +127,46 @@ void BuildTriangles(uint3 dispatchThreadId : SV_DispatchThreadID)
         result.receiverArea = 0.5 * length(cross(h1.position - h0.position, h2.position - h0.position));
         result.intensity = result.incidentArea / max(result.receiverArea, _MinReceiverArea);
         result.valid = result.incidentArea > 0 && result.receiverArea > 0;
+        const float3 renderAreaVector = cross(h1.position - h0.position, h2.position - h0.position);
+        const float renderAreaLengthSq = dot(renderAreaVector, renderAreaVector);
+        const float3 rayDirection = normalize(
+            (h0.position + h1.position + h2.position)
+            - (x0 + x1 + x2));
+        result.renderNormal = renderAreaLengthSq > 1e-16
+            ? renderAreaVector * rsqrt(renderAreaLengthSq)
+            : -rayDirection;
+        if (dot(result.renderNormal, rayDirection) > 0)
+            result.renderNormal = -result.renderNormal;
     }
 
     _TriangleResults[triangleIndex] = result;
+}
+
+[numthreads(64, 1, 1)]
+void BuildRenderNormals(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    const uint vertexIndex = dispatchThreadId.x;
+    if (vertexIndex >= _VertexCount)
+        return;
+
+    float3 normalSum = 0;
+    const uint adjacencyStart = _VertexTriangleOffsets[vertexIndex];
+    const uint adjacencyEnd = _VertexTriangleOffsets[vertexIndex + 1];
+    for (uint adjacencyIndex = adjacencyStart; adjacencyIndex < adjacencyEnd; adjacencyIndex++)
+    {
+        const TriangleResult triangleResult = _TriangleResults[_VertexTriangleIndices[adjacencyIndex]];
+        if (triangleResult.valid != 0)
+            normalSum += triangleResult.renderNormal * triangleResult.receiverArea;
+    }
+
+    const float normalLengthSq = dot(normalSum, normalSum);
+    if (normalLengthSq > 1e-16)
+    {
+        _RenderNormals[vertexIndex] = normalSum * rsqrt(normalLengthSq);
+        return;
+    }
+
+    const RayHit hit = _Hits[vertexIndex];
+    const float3 fallbackDirection = normalize(hit.position - GetSourceVertexWorld(vertexIndex));
+    _RenderNormals[vertexIndex] = -fallbackDirection;
 }

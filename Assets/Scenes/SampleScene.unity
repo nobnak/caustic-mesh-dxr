@@ -205,8 +205,8 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 330585543}
   serializedVersion: 2
-  m_LocalRotation: {x: 0.1552954, y: -0.13879295, z: 0.022042787, w: 0.977821}
-  m_LocalPosition: {x: 3.1089032, y: -0.16079864, z: -4.1019297}
+  m_LocalRotation: {x: 0.70710677, y: -0.000000044703487, z: -0.000000022351744, w: 0.7071068}
+  m_LocalPosition: {x: 1.75, y: 1.03, z: -0.04}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -308,12 +308,12 @@ MonoBehaviour:
   projectedTriangleShader: {fileID: 4800000, guid: 561de9e0317c4eeeb34a3a1b9914bf02, type: 3}
   sourceGridOutlineShader: {fileID: 4800000, guid: d5d9f9c1853c47a1b7c45a0f7be6d201, type: 3}
   sourceSize: {x: 10, y: 10}
-  cellSize: 0.1
-  waveAmplitude: 0.02
+  cellSize: 0.01
+  waveAmplitude: 0.032
   waveLength: 1
   waveCenter: {x: 0, y: 0}
   waveCenterSmoothing: 0.05
-  animateWave: 0
+  animateWave: 1
   waveSpeed: 0.3
   wavePhase: 0
   transmittedRefractiveIndex: 1.333
@@ -322,7 +322,8 @@ MonoBehaviour:
   minReceiverArea: 0.00001
   causticColor: {r: 1, g: 0.7, b: 0.1, a: 1}
   intensityScale: 0.25
-  showSourceGrid: 1
+  surfaceOffset: 0.003
+  showSourceGrid: 0
   sourceGridColor: {r: 0, g: 1, b: 1, a: 1}
   runContinuously: 0
   scalarRelativeTolerance: 0.001
@@ -519,7 +520,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: 31321ba15b8f8eb4c954353edc038b1d, type: 2}
+  - {fileID: 2100000, guid: 4ed0fe3914f9b7e4f874f41af1ae6c34, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0
@@ -681,7 +682,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: 31321ba15b8f8eb4c954353edc038b1d, type: 2}
+  - {fileID: 2100000, guid: 4ed0fe3914f9b7e4f874f41af1ae6c34, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0

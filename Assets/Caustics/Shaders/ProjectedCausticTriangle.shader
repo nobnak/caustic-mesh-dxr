@@ -37,13 +37,17 @@ Shader "Hidden/Caustics/Projected Triangle"
                 float incidentArea;
                 float receiverArea;
                 uint valid;
+                float3 renderNormal;
+                float padding;
             };
 
             StructuredBuffer<uint> _SourceIndices;
             StructuredBuffer<RayHit> _Hits;
             StructuredBuffer<TriangleResult> _TriangleResults;
+            StructuredBuffer<float3> _RenderNormals;
             float4 _Color;
             float _IntensityScale;
+            float _SurfaceOffset;
 
             struct Varyings
             {
@@ -57,13 +61,10 @@ Shader "Hidden/Caustics/Projected Triangle"
                 const uint triangleIndex = vertexId / 3;
                 const uint sourceVertexIndex = _SourceIndices[vertexId];
                 const TriangleResult triangleResult = _TriangleResults[triangleIndex];
+                const float3 positionWS = _Hits[sourceVertexIndex].position
+                    + _RenderNormals[sourceVertexIndex] * _SurfaceOffset;
                 Varyings output;
-                output.positionCS = mul(UNITY_MATRIX_VP, float4(_Hits[sourceVertexIndex].position, 1));
-                #if defined(UNITY_REVERSED_Z)
-                    output.positionCS.z += 0.0001 * output.positionCS.w;
-                #else
-                    output.positionCS.z -= 0.0001 * output.positionCS.w;
-                #endif
+                output.positionCS = mul(UNITY_MATRIX_VP, float4(positionWS, 1));
                 output.intensity = triangleResult.intensity * _IntensityScale;
                 output.valid = triangleResult.valid;
                 return output;

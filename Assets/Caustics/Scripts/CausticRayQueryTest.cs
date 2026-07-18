@@ -18,6 +18,9 @@ namespace CausticMeshDxr
         static readonly int SourceLineIndicesId = Shader.PropertyToID("_SourceLineIndices");
         static readonly int HitsId = Shader.PropertyToID("_Hits");
         static readonly int TriangleResultsId = Shader.PropertyToID("_TriangleResults");
+        static readonly int VertexTriangleOffsetsId = Shader.PropertyToID("_VertexTriangleOffsets");
+        static readonly int VertexTriangleIndicesId = Shader.PropertyToID("_VertexTriangleIndices");
+        static readonly int RenderNormalsId = Shader.PropertyToID("_RenderNormals");
         static readonly int SourceLocalToWorldId = Shader.PropertyToID("_SourceLocalToWorld");
         static readonly int SourceNormalToWorldId = Shader.PropertyToID("_SourceNormalToWorld");
         static readonly int VertexCountId = Shader.PropertyToID("_VertexCount");
@@ -29,6 +32,7 @@ namespace CausticMeshDxr
         static readonly int MinReceiverAreaId = Shader.PropertyToID("_MinReceiverArea");
         static readonly int ColorId = Shader.PropertyToID("_Color");
         static readonly int IntensityScaleId = Shader.PropertyToID("_IntensityScale");
+        static readonly int SurfaceOffsetId = Shader.PropertyToID("_SurfaceOffset");
 
         [Header("Scene")]
         [SerializeField] MeshRenderer[] receivers;
@@ -57,6 +61,7 @@ namespace CausticMeshDxr
         [Header("Display")]
         [SerializeField] Color causticColor = new(1, 0.7f, 0.1f, 1);
         [SerializeField, Min(0)] float intensityScale = 0.25f;
+        [SerializeField, Min(0)] float surfaceOffset = 0.002f;
         [SerializeField] bool showSourceGrid = true;
         [SerializeField] Color sourceGridColor = Color.cyan;
 
@@ -71,9 +76,14 @@ namespace CausticMeshDxr
         GraphicsBuffer sourceLineIndexBuffer;
         GraphicsBuffer hitBuffer;
         GraphicsBuffer triangleResultBuffer;
+        GraphicsBuffer vertexTriangleOffsetBuffer;
+        GraphicsBuffer vertexTriangleIndexBuffer;
+        GraphicsBuffer renderNormalBuffer;
         SourceVertex[] sourceVertices;
         uint[] sourceIndices;
         uint[] sourceLineIndices;
+        uint[] vertexTriangleOffsets;
+        uint[] vertexTriangleIndices;
         int cellCountX;
         int cellCountZ;
         int vertexCount;
@@ -87,6 +97,7 @@ namespace CausticMeshDxr
         readonly List<ReceiverState> receiverStates = new();
         int traceKernel;
         int buildTrianglesKernel;
+        int buildRenderNormalsKernel;
         bool initialized;
         int readbackPendingCount;
         uint dispatchGeneration;
@@ -133,6 +144,8 @@ namespace CausticMeshDxr
             public float incidentArea;
             public float receiverArea;
             public uint valid;
+            public Vector3 renderNormal;
+            public float padding;
         }
 
         void RebuildGridData()
@@ -147,6 +160,7 @@ namespace CausticMeshDxr
             sourceVertices = new SourceVertex[vertexCount];
             sourceIndices = CreateGridIndices();
             sourceLineIndices = CreateGridLineIndices();
+            CreateVertexTriangleAdjacency();
             lineVertexCount = sourceLineIndices.Length;
         }
 
@@ -254,6 +268,28 @@ namespace CausticMeshDxr
                 }
             }
             return indices;
+        }
+
+        void CreateVertexTriangleAdjacency()
+        {
+            var triangleCounts = new uint[vertexCount];
+            for (var index = 0; index < sourceIndices.Length; index++)
+                triangleCounts[sourceIndices[index]]++;
+            vertexTriangleOffsets = new uint[vertexCount + 1];
+            vertexTriangleIndices = new uint[drawVertexCount];
+            for (var vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++)
+                vertexTriangleOffsets[vertexIndex + 1] = vertexTriangleOffsets[vertexIndex] + triangleCounts[vertexIndex];
+
+            var writeOffsets = (uint[])vertexTriangleOffsets.Clone();
+            for (var triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++)
+            {
+                var indexOffset = triangleIndex * 3;
+                for (var corner = 0; corner < 3; corner++)
+                {
+                    var vertexIndex = sourceIndices[indexOffset + corner];
+                    vertexTriangleIndices[writeOffsets[vertexIndex]++] = (uint)triangleIndex;
+                }
+            }
         }
 
         void OnEnable()
@@ -445,6 +481,20 @@ namespace CausticMeshDxr
                 GraphicsBuffer.Target.Structured,
                 triangleCount,
                 Marshal.SizeOf<TriangleResult>());
+            vertexTriangleOffsetBuffer = new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured,
+                vertexTriangleOffsets.Length,
+                sizeof(uint));
+            vertexTriangleOffsetBuffer.SetData(vertexTriangleOffsets);
+            vertexTriangleIndexBuffer = new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured,
+                vertexTriangleIndices.Length,
+                sizeof(uint));
+            vertexTriangleIndexBuffer.SetData(vertexTriangleIndices);
+            renderNormalBuffer = new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured,
+                vertexCount,
+                Marshal.SizeOf<Vector3>());
 
             projectedTriangleMaterial = new Material(projectedTriangleShader)
             {
@@ -453,9 +503,11 @@ namespace CausticMeshDxr
             projectedTriangleMaterial.SetBuffer(SourceIndicesId, sourceIndexBuffer);
             projectedTriangleMaterial.SetBuffer(HitsId, hitBuffer);
             projectedTriangleMaterial.SetBuffer(TriangleResultsId, triangleResultBuffer);
+            projectedTriangleMaterial.SetBuffer(RenderNormalsId, renderNormalBuffer);
 
             traceKernel = rayQueryShader.FindKernel("TraceVertices");
             buildTrianglesKernel = rayQueryShader.FindKernel("BuildTriangles");
+            buildRenderNormalsKernel = rayQueryShader.FindKernel("BuildRenderNormals");
             initialized = true;
             lastSourceTransform = transform.localToWorldMatrix;
             lastIncidentDirection = directionalLight.transform.forward.normalized;
@@ -481,6 +533,12 @@ namespace CausticMeshDxr
             rayQueryShader.SetBuffer(buildTrianglesKernel, SourceIndicesId, sourceIndexBuffer);
             rayQueryShader.SetBuffer(buildTrianglesKernel, HitsId, hitBuffer);
             rayQueryShader.SetBuffer(buildTrianglesKernel, TriangleResultsId, triangleResultBuffer);
+            rayQueryShader.SetBuffer(buildRenderNormalsKernel, SourceVerticesId, sourceVertexBuffer);
+            rayQueryShader.SetBuffer(buildRenderNormalsKernel, HitsId, hitBuffer);
+            rayQueryShader.SetBuffer(buildRenderNormalsKernel, TriangleResultsId, triangleResultBuffer);
+            rayQueryShader.SetBuffer(buildRenderNormalsKernel, VertexTriangleOffsetsId, vertexTriangleOffsetBuffer);
+            rayQueryShader.SetBuffer(buildRenderNormalsKernel, VertexTriangleIndicesId, vertexTriangleIndexBuffer);
+            rayQueryShader.SetBuffer(buildRenderNormalsKernel, RenderNormalsId, renderNormalBuffer);
             rayQueryShader.SetMatrix(SourceLocalToWorldId, transform.localToWorldMatrix);
             rayQueryShader.SetMatrix(SourceNormalToWorldId, transform.worldToLocalMatrix.transpose);
             rayQueryShader.SetInt(VertexCountId, vertexCount);
@@ -492,9 +550,11 @@ namespace CausticMeshDxr
             rayQueryShader.SetFloat(MinReceiverAreaId, minReceiverArea);
             rayQueryShader.Dispatch(traceKernel, DivideRoundUp(vertexCount, ComputeThreadCount), 1, 1);
             rayQueryShader.Dispatch(buildTrianglesKernel, DivideRoundUp(triangleCount, ComputeThreadCount), 1, 1);
+            rayQueryShader.Dispatch(buildRenderNormalsKernel, DivideRoundUp(vertexCount, ComputeThreadCount), 1, 1);
 
             projectedTriangleMaterial.SetColor(ColorId, causticColor);
             projectedTriangleMaterial.SetFloat(IntensityScaleId, intensityScale);
+            projectedTriangleMaterial.SetFloat(SurfaceOffsetId, surfaceOffset);
             if (readbackPendingCount != 0)
             {
                 validationRefreshRequested = true;
@@ -901,6 +961,12 @@ namespace CausticMeshDxr
             hitBuffer = null;
             triangleResultBuffer?.Dispose();
             triangleResultBuffer = null;
+            vertexTriangleOffsetBuffer?.Dispose();
+            vertexTriangleOffsetBuffer = null;
+            vertexTriangleIndexBuffer?.Dispose();
+            vertexTriangleIndexBuffer = null;
+            renderNormalBuffer?.Dispose();
+            renderNormalBuffer = null;
             accelerationStructure?.Dispose();
             accelerationStructure = null;
             if (projectedTriangleMaterial != null)
