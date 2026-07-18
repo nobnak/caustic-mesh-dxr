@@ -37,7 +37,6 @@ RWStructuredBuffer<TriangleResult> _TriangleResults;
 
 float4x4 _SourceLocalToWorld;
 float4x4 _SourceNormalToWorld;
-float _SourceSize;
 uint _VertexCount;
 uint _TriangleCount;
 float3 _IncidentDirection;
@@ -48,7 +47,7 @@ float _MinReceiverArea;
 
 float3 GetSourceVertexWorld(uint index)
 {
-    return mul(_SourceLocalToWorld, float4(_SourceVertices[index].position * _SourceSize, 1)).xyz;
+    return mul(_SourceLocalToWorld, float4(_SourceVertices[index].position, 1)).xyz;
 }
 
 float3 GetSourceNormalWorld(uint index)

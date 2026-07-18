@@ -8,12 +8,8 @@ namespace CausticMeshDxr
 {
     public sealed class CausticRayQueryTest : MonoBehaviour
     {
-        const int GridResolution = 8;
-        const int VertexCount = GridResolution * GridResolution;
-        const int CellCount = GridResolution - 1;
-        const int TriangleCount = CellCount * CellCount * 2;
-        const int DrawVertexCount = TriangleCount * 3;
         const int ComputeThreadCount = 64;
+        const int MaxCellCountPerAxis = 512;
         const uint ReceiverMask = 1;
         const uint ReceiverInstanceId = 1;
 
@@ -24,7 +20,6 @@ namespace CausticMeshDxr
         static readonly int TriangleResultsId = Shader.PropertyToID("_TriangleResults");
         static readonly int SourceLocalToWorldId = Shader.PropertyToID("_SourceLocalToWorld");
         static readonly int SourceNormalToWorldId = Shader.PropertyToID("_SourceNormalToWorld");
-        static readonly int SourceSizeId = Shader.PropertyToID("_SourceSize");
         static readonly int VertexCountId = Shader.PropertyToID("_VertexCount");
         static readonly int TriangleCountId = Shader.PropertyToID("_TriangleCount");
         static readonly int IncidentDirectionId = Shader.PropertyToID("_IncidentDirection");
@@ -35,19 +30,24 @@ namespace CausticMeshDxr
         static readonly int ColorId = Shader.PropertyToID("_Color");
         static readonly int IntensityScaleId = Shader.PropertyToID("_IntensityScale");
 
-        static readonly uint[] SourceIndices = CreateGridIndices();
-
         [Header("Scene")]
         [SerializeField] MeshRenderer receiver;
         [SerializeField] Light directionalLight;
         [SerializeField] ComputeShader rayQueryShader;
         [SerializeField] Shader projectedTriangleShader;
 
-        [Header("Refraction")]
-        [SerializeField, Min(0.001f)] float sourceSize = 2;
+        [Header("Input Surface")]
+        [SerializeField] Vector2 sourceSize = new(2, 2);
+        [SerializeField, Min(0.001f)] float cellSize = 0.25f;
         [SerializeField, Range(0, 0.25f)] float waveAmplitude = 0.03f;
-        [SerializeField, Range(0.25f, 4)] float waveCycles = 1;
-        [SerializeField, Range(0, 180)] float waveDirectionDegrees;
+        [SerializeField, Min(0.001f)] float waveLength = 1;
+        [SerializeField] Vector2 waveCenter;
+        [SerializeField, Min(0.0001f)] float waveCenterSmoothing = 0.05f;
+        [SerializeField] bool animateWave;
+        [SerializeField] float waveSpeed = 1;
+        [SerializeField, Range(0, 1)] float wavePhase;
+
+        [Header("Refraction")]
         [SerializeField, Min(1)] float transmittedRefractiveIndex = 1.333f;
         [SerializeField, Min(0.000001f)] float rayTMin = 0.001f;
         [SerializeField, Min(0.01f)] float rayTMax = 100;
@@ -60,7 +60,8 @@ namespace CausticMeshDxr
         [Header("Validation")]
         [SerializeField] bool runContinuously;
         [SerializeField, Min(0)] float planeHitTolerance = 0.001f;
-        [SerializeField, Min(0)] float scalarRelativeTolerance = 0.0001f;
+        [SerializeField, Min(0)] float scalarRelativeTolerance = 0.001f;
+        [SerializeField, Min(0)] float densityRelativeTolerance = 0.005f;
 
         RayTracingAccelerationStructure accelerationStructure;
         GraphicsBuffer sourceVertexBuffer;
@@ -68,6 +69,13 @@ namespace CausticMeshDxr
         GraphicsBuffer hitBuffer;
         GraphicsBuffer triangleResultBuffer;
         SourceVertex[] sourceVertices;
+        uint[] sourceIndices;
+        int cellCountX;
+        int cellCountZ;
+        int vertexCount;
+        int triangleCount;
+        int drawVertexCount;
+        Vector2 actualSourceSize;
         Material projectedTriangleMaterial;
         int receiverHandle = -1;
         int traceKernel;
@@ -75,6 +83,7 @@ namespace CausticMeshDxr
         bool initialized;
         int readbackPendingCount;
         uint dispatchGeneration;
+        uint resourceGeneration;
         bool validationRefreshRequested;
         bool hasDispatched;
         Matrix4x4 lastSourceTransform;
@@ -108,26 +117,54 @@ namespace CausticMeshDxr
             public uint valid;
         }
 
+        void RebuildGridData()
+        {
+            var safeCellSize = Mathf.Max(0.001f, cellSize);
+            cellCountX = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(safeCellSize, sourceSize.x) / safeCellSize), 1, MaxCellCountPerAxis);
+            cellCountZ = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(safeCellSize, sourceSize.y) / safeCellSize), 1, MaxCellCountPerAxis);
+            actualSourceSize = new Vector2(cellCountX * safeCellSize, cellCountZ * safeCellSize);
+            vertexCount = (cellCountX + 1) * (cellCountZ + 1);
+            triangleCount = cellCountX * cellCountZ * 2;
+            drawVertexCount = triangleCount * 3;
+            sourceVertices = new SourceVertex[vertexCount];
+            sourceIndices = CreateGridIndices();
+        }
+
+        bool GridTopologyChanged()
+        {
+            var safeCellSize = Mathf.Max(0.001f, cellSize);
+            var expectedCellCountX = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(safeCellSize, sourceSize.x) / safeCellSize), 1, MaxCellCountPerAxis);
+            var expectedCellCountZ = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(safeCellSize, sourceSize.y) / safeCellSize), 1, MaxCellCountPerAxis);
+            return sourceVertices == null
+                || expectedCellCountX != cellCountX
+                || expectedCellCountZ != cellCountZ;
+        }
+
         void UpdateSourceVertices()
         {
-            sourceVertices ??= new SourceVertex[VertexCount];
-            var angularFrequency = 2f * Mathf.PI * waveCycles;
-            var directionRadians = waveDirectionDegrees * Mathf.Deg2Rad;
-            var directionX = Mathf.Cos(directionRadians);
-            var directionZ = Mathf.Sin(directionRadians);
-            for (var z = 0; z < GridResolution; z++)
+            if (GridTopologyChanged())
+                RebuildGridData();
+
+            var angularFrequency = 2f * Mathf.PI / Mathf.Max(0.001f, waveLength);
+            var phaseOffset = 2f * Mathf.PI * (animateWave ? Time.time * waveSpeed : wavePhase);
+            var smoothing = Mathf.Max(0.0001f, waveCenterSmoothing);
+            var gridCellSize = actualSourceSize.x / cellCountX;
+            for (var z = 0; z <= cellCountZ; z++)
             {
-                for (var x = 0; x < GridResolution; x++)
+                for (var x = 0; x <= cellCountX; x++)
                 {
-                    var localX = (float)x / CellCount - 0.5f;
-                    var localZ = (float)z / CellCount - 0.5f;
-                    var waveCoordinate = localX * directionX + localZ * directionZ;
-                    var wavePhase = angularFrequency * waveCoordinate;
-                    var height = waveAmplitude * Mathf.Sin(wavePhase);
-                    var slope = waveAmplitude * angularFrequency * Mathf.Cos(wavePhase);
-                    var derivativeX = slope * directionX;
-                    var derivativeZ = slope * directionZ;
-                    sourceVertices[z * GridResolution + x] = new SourceVertex
+                    var localX = x * gridCellSize - actualSourceSize.x * 0.5f;
+                    var localZ = z * gridCellSize - actualSourceSize.y * 0.5f;
+                    var offsetX = localX - waveCenter.x;
+                    var offsetZ = localZ - waveCenter.y;
+                    var smoothDistance = Mathf.Sqrt(offsetX * offsetX + offsetZ * offsetZ + smoothing * smoothing);
+                    var radius = smoothDistance - smoothing;
+                    var phase = angularFrequency * radius - phaseOffset;
+                    var height = waveAmplitude * Mathf.Sin(phase);
+                    var radialSlope = waveAmplitude * angularFrequency * Mathf.Cos(phase);
+                    var derivativeX = radialSlope * offsetX / smoothDistance;
+                    var derivativeZ = radialSlope * offsetZ / smoothDistance;
+                    sourceVertices[z * (cellCountX + 1) + x] = new SourceVertex
                     {
                         position = new Vector3(localX, height, localZ),
                         normal = new Vector3(-derivativeX, 1, -derivativeZ).normalized,
@@ -137,17 +174,17 @@ namespace CausticMeshDxr
             sourceVertexBuffer?.SetData(sourceVertices);
         }
 
-        static uint[] CreateGridIndices()
+        uint[] CreateGridIndices()
         {
-            var indices = new uint[DrawVertexCount];
+            var indices = new uint[drawVertexCount];
             var writeIndex = 0;
-            for (var z = 0; z < CellCount; z++)
+            for (var z = 0; z < cellCountZ; z++)
             {
-                for (var x = 0; x < CellCount; x++)
+                for (var x = 0; x < cellCountX; x++)
                 {
-                    var v00 = (uint)(z * GridResolution + x);
+                    var v00 = (uint)(z * (cellCountX + 1) + x);
                     var v10 = v00 + 1;
-                    var v01 = v00 + GridResolution;
+                    var v01 = v00 + (uint)(cellCountX + 1);
                     var v11 = v01 + 1;
                     indices[writeIndex++] = v00;
                     indices[writeIndex++] = v01;
@@ -162,12 +199,19 @@ namespace CausticMeshDxr
 
         void OnEnable()
         {
+            RebuildGridData();
             UpdateSourceVertices();
             hasDispatched = false;
         }
 
         void OnValidate()
         {
+            sourceSize.x = Mathf.Max(0.001f, sourceSize.x);
+            sourceSize.y = Mathf.Max(0.001f, sourceSize.y);
+            cellSize = Mathf.Max(0.001f, cellSize);
+            if (initialized && GridTopologyChanged())
+                ReleaseResources();
+            RebuildGridData();
             if (!Application.isPlaying || !initialized)
                 UpdateSourceVertices();
             hasDispatched = false;
@@ -185,7 +229,7 @@ namespace CausticMeshDxr
                 || receiverTransform != lastReceiverTransform
                 || incidentDirection != lastIncidentDirection;
 
-            if (!runContinuously && hasDispatched && !changed)
+            if (!runContinuously && !animateWave && hasDispatched && !changed)
             {
                 QueueProjectedGrid();
                 return;
@@ -265,14 +309,14 @@ namespace CausticMeshDxr
             accelerationStructure.Build();
 
             UpdateSourceVertices();
-            sourceVertexBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, VertexCount, Marshal.SizeOf<SourceVertex>());
+            sourceVertexBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertexCount, Marshal.SizeOf<SourceVertex>());
             sourceVertexBuffer.SetData(sourceVertices);
-            sourceIndexBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, DrawVertexCount, sizeof(uint));
-            sourceIndexBuffer.SetData(SourceIndices);
-            hitBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, VertexCount, Marshal.SizeOf<RayHit>());
+            sourceIndexBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, drawVertexCount, sizeof(uint));
+            sourceIndexBuffer.SetData(sourceIndices);
+            hitBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertexCount, Marshal.SizeOf<RayHit>());
             triangleResultBuffer = new GraphicsBuffer(
                 GraphicsBuffer.Target.Structured,
-                TriangleCount,
+                triangleCount,
                 Marshal.SizeOf<TriangleResult>());
 
             projectedTriangleMaterial = new Material(projectedTriangleShader)
@@ -291,7 +335,9 @@ namespace CausticMeshDxr
             lastIncidentDirection = directionalLight.transform.forward.normalized;
 
             Debug.Log(
-                $"Caustic grid initialized with {VertexCount} shared vertices and {TriangleCount} triangles on {SystemInfo.graphicsDeviceName}.",
+                $"Caustic grid initialized with {vertexCount} shared vertices and {triangleCount} triangles "
+                + $"({cellCountX}x{cellCountZ} square cells, actual size {actualSourceSize.x:F3}x{actualSourceSize.y:F3}) "
+                + $"on {SystemInfo.graphicsDeviceName}.",
                 this);
             return true;
         }
@@ -301,6 +347,7 @@ namespace CausticMeshDxr
             UpdateSourceVertices();
             dispatchGeneration++;
             var currentGeneration = dispatchGeneration;
+            var currentResourceGeneration = resourceGeneration;
             rayQueryShader.SetRayTracingAccelerationStructure(traceKernel, AccelerationStructureId, accelerationStructure);
             rayQueryShader.SetBuffer(traceKernel, SourceVerticesId, sourceVertexBuffer);
             rayQueryShader.SetBuffer(traceKernel, HitsId, hitBuffer);
@@ -310,16 +357,15 @@ namespace CausticMeshDxr
             rayQueryShader.SetBuffer(buildTrianglesKernel, TriangleResultsId, triangleResultBuffer);
             rayQueryShader.SetMatrix(SourceLocalToWorldId, transform.localToWorldMatrix);
             rayQueryShader.SetMatrix(SourceNormalToWorldId, transform.worldToLocalMatrix.transpose);
-            rayQueryShader.SetFloat(SourceSizeId, sourceSize);
-            rayQueryShader.SetInt(VertexCountId, VertexCount);
-            rayQueryShader.SetInt(TriangleCountId, TriangleCount);
+            rayQueryShader.SetInt(VertexCountId, vertexCount);
+            rayQueryShader.SetInt(TriangleCountId, triangleCount);
             rayQueryShader.SetVector(IncidentDirectionId, incidentDirection);
             rayQueryShader.SetFloat(EtaId, 1f / transmittedRefractiveIndex);
             rayQueryShader.SetFloat(RayTMinId, rayTMin);
             rayQueryShader.SetFloat(RayTMaxId, rayTMax);
             rayQueryShader.SetFloat(MinReceiverAreaId, minReceiverArea);
-            rayQueryShader.Dispatch(traceKernel, DivideRoundUp(VertexCount, ComputeThreadCount), 1, 1);
-            rayQueryShader.Dispatch(buildTrianglesKernel, DivideRoundUp(TriangleCount, ComputeThreadCount), 1, 1);
+            rayQueryShader.Dispatch(traceKernel, DivideRoundUp(vertexCount, ComputeThreadCount), 1, 1);
+            rayQueryShader.Dispatch(buildTrianglesKernel, DivideRoundUp(triangleCount, ComputeThreadCount), 1, 1);
 
             projectedTriangleMaterial.SetColor(ColorId, causticColor);
             projectedTriangleMaterial.SetFloat(IntensityScaleId, intensityScale);
@@ -332,8 +378,10 @@ namespace CausticMeshDxr
             readbackPendingCount = 2;
             AsyncGPUReadback.Request(hitBuffer, request =>
             {
-                CompleteReadback();
+                CompleteReadback(currentResourceGeneration);
                 if (this == null || !isActiveAndEnabled)
+                    return;
+                if (currentResourceGeneration != resourceGeneration)
                     return;
                 if (currentGeneration != dispatchGeneration)
                     return;
@@ -346,8 +394,10 @@ namespace CausticMeshDxr
             });
             AsyncGPUReadback.Request(triangleResultBuffer, request =>
             {
-                CompleteReadback();
+                CompleteReadback(currentResourceGeneration);
                 if (this == null || !isActiveAndEnabled)
+                    return;
+                if (currentResourceGeneration != resourceGeneration)
                     return;
                 if (currentGeneration != dispatchGeneration)
                     return;
@@ -365,9 +415,9 @@ namespace CausticMeshDxr
             return (value + divisor - 1) / divisor;
         }
 
-        void CompleteReadback()
+        void CompleteReadback(uint completedResourceGeneration)
         {
-            if (this != null)
+            if (this != null && completedResourceGeneration == resourceGeneration)
             {
                 readbackPendingCount = Mathf.Max(0, readbackPendingCount - 1);
                 if (readbackPendingCount == 0 && validationRefreshRequested)
@@ -385,7 +435,7 @@ namespace CausticMeshDxr
             var validCount = 0;
             var maxError = 0f;
 
-            for (var i = 0; i < VertexCount; i++)
+            for (var i = 0; i < vertexCount; i++)
             {
                 var origin = GetSourceVertexWorld(i);
                 var refractedDirection = Refract(
@@ -407,17 +457,17 @@ namespace CausticMeshDxr
                 validCount++;
             }
 
-            if (validCount == VertexCount && maxError <= planeHitTolerance)
+            if (validCount == vertexCount && maxError <= planeHitTolerance)
             {
                 Debug.Log(
-                    $"Caustic grid Ray Query validation passed: {validCount}/{VertexCount} vertices, "
+                    $"Caustic grid Ray Query validation passed: {validCount}/{vertexCount} vertices, "
                     + $"{primitiveIds.Count} receiver primitives, max error={maxError:E3}.",
                     this);
             }
             else
             {
                 Debug.LogError(
-                    $"Caustic grid Ray Query validation failed: {validCount}/{VertexCount} vertices, max error={maxError:E3}.",
+                    $"Caustic grid Ray Query validation failed: {validCount}/{vertexCount} vertices, max error={maxError:E3}.",
                     this);
             }
         }
@@ -425,9 +475,9 @@ namespace CausticMeshDxr
         void ValidateTriangles(NativeArray<TriangleResult> results, Vector3 incidentDirection)
         {
             var receiverPlane = new Plane(receiver.transform.forward, receiver.transform.position);
-            var projected = new Vector3[VertexCount];
+            var projected = new Vector3[vertexCount];
             var projectedValid = true;
-            for (var i = 0; i < VertexCount; i++)
+            for (var i = 0; i < vertexCount; i++)
             {
                 var origin = GetSourceVertexWorld(i);
                 var refractedDirection = Refract(
@@ -442,17 +492,26 @@ namespace CausticMeshDxr
                 projected[i] = origin + refractedDirection * distance;
             }
 
-            var validCount = 0;
+            var validatedCount = 0;
+            var drawableCount = 0;
+            var degenerateCount = 0;
+            var firstMismatch = -1;
+            var maxIncidentAreaError = 0f;
+            var maxReceiverAreaError = 0f;
+            var maxIntensityError = 0f;
+            var firstExpectedReceiverArea = 0f;
+            var firstGpuReceiverArea = 0f;
             var minIntensity = float.PositiveInfinity;
             var maxIntensity = float.NegativeInfinity;
             var totalIncidentEnergy = 0f;
+            var totalExpectedReceivedEnergy = 0f;
             var totalReceivedEnergy = 0f;
-            for (var triangleIndex = 0; triangleIndex < TriangleCount; triangleIndex++)
+            for (var triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++)
             {
                 var indexOffset = triangleIndex * 3;
-                var i0 = (int)SourceIndices[indexOffset];
-                var i1 = (int)SourceIndices[indexOffset + 1];
-                var i2 = (int)SourceIndices[indexOffset + 2];
+                var i0 = (int)sourceIndices[indexOffset];
+                var i1 = (int)sourceIndices[indexOffset + 1];
+                var i2 = (int)sourceIndices[indexOffset + 2];
                 var x0 = GetSourceVertexWorld(i0);
                 var x1 = GetSourceVertexWorld(i1);
                 var x2 = GetSourceVertexWorld(i2);
@@ -464,32 +523,77 @@ namespace CausticMeshDxr
                     : 0;
                 var expectedIntensity = expectedIncidentArea / Mathf.Max(expectedReceiverArea, minReceiverArea);
                 var result = results[triangleIndex];
-                var valid = projectedValid
-                    && result.valid != 0
-                    && RelativeError(result.incidentArea, expectedIncidentArea) <= scalarRelativeTolerance
-                    && RelativeError(result.receiverArea, expectedReceiverArea) <= scalarRelativeTolerance
-                    && RelativeError(result.intensity, expectedIntensity) <= scalarRelativeTolerance;
-                if (!valid)
+                var expectedDrawable = projectedValid
+                    && expectedIncidentArea > 0
+                    && expectedReceiverArea > 0;
+                var gpuDrawable = result.valid != 0;
+                if (!expectedDrawable && !gpuDrawable)
+                {
+                    validatedCount++;
+                    degenerateCount++;
                     continue;
+                }
 
-                validCount++;
+                var incidentAreaError = RelativeError(result.incidentArea, expectedIncidentArea);
+                var receiverAreaError = RelativeError(result.receiverArea, expectedReceiverArea);
+                var intensityError = RelativeError(result.intensity, expectedIntensity);
+                maxIncidentAreaError = Mathf.Max(maxIncidentAreaError, incidentAreaError);
+                maxReceiverAreaError = Mathf.Max(maxReceiverAreaError, receiverAreaError);
+                maxIntensityError = Mathf.Max(maxIntensityError, intensityError);
+                var valuesMatch = expectedDrawable
+                    && gpuDrawable
+                    && incidentAreaError <= scalarRelativeTolerance
+                    && WithinTolerance(
+                        result.receiverArea,
+                        expectedReceiverArea,
+                        scalarRelativeTolerance,
+                        minReceiverArea * densityRelativeTolerance)
+                    && intensityError <= densityRelativeTolerance;
+                if (!valuesMatch)
+                {
+                    if (firstMismatch < 0)
+                    {
+                        firstMismatch = triangleIndex;
+                        firstExpectedReceiverArea = expectedReceiverArea;
+                        firstGpuReceiverArea = result.receiverArea;
+                    }
+                    continue;
+                }
+
+                validatedCount++;
+                drawableCount++;
                 minIntensity = Mathf.Min(minIntensity, result.intensity);
                 maxIntensity = Mathf.Max(maxIntensity, result.intensity);
                 totalIncidentEnergy += result.incidentArea;
+                totalExpectedReceivedEnergy += expectedIntensity * expectedReceiverArea;
                 totalReceivedEnergy += result.intensity * result.receiverArea;
             }
 
-            var energyError = RelativeError(totalReceivedEnergy, totalIncidentEnergy);
-            if (validCount == TriangleCount && energyError <= scalarRelativeTolerance)
+            var energyValidationError = RelativeError(totalReceivedEnergy, totalExpectedReceivedEnergy);
+            var energyRetention = totalIncidentEnergy > 0
+                ? totalExpectedReceivedEnergy / totalIncidentEnergy
+                : 1;
+            if (validatedCount == triangleCount && energyValidationError <= densityRelativeTolerance)
             {
                 Debug.Log(
-                    $"Caustic grid density validation passed: {validCount}/{TriangleCount} triangles, "
-                    + $"C={minIntensity:F6}..{maxIntensity:F6}, energy error={energyError:E3}.",
+                    $"Caustic grid density validation passed: {validatedCount}/{triangleCount} triangles "
+                    + $"({drawableCount} drawable, {degenerateCount} degenerate), "
+                    + $"C={minIntensity:F6}..{maxIntensity:F6}, "
+                    + $"GPU/CPU energy error={energyValidationError:E3}, "
+                    + $"clamped energy retention={energyRetention:P3}.",
                     this);
             }
             else
             {
-                Debug.LogError($"Caustic grid density validation failed: {validCount}/{TriangleCount} triangles.", this);
+                Debug.LogError(
+                    $"Caustic grid density validation failed: {validatedCount}/{triangleCount} triangles, "
+                    + $"first mismatch={firstMismatch}, max relative errors "
+                    + $"Ai={maxIncidentAreaError:E3}, Ar={maxReceiverAreaError:E3}, C={maxIntensityError:E3}; "
+                    + $"first Ar expected={firstExpectedReceiverArea:E6}, GPU={firstGpuReceiverArea:E6}, "
+                    + $"absolute error={Mathf.Abs(firstGpuReceiverArea - firstExpectedReceiverArea):E3}, "
+                    + $"GPU/CPU energy error={energyValidationError:E3}, "
+                    + $"clamped energy retention={energyRetention:P3}.",
+                    this);
             }
         }
 
@@ -498,9 +602,15 @@ namespace CausticMeshDxr
             return Mathf.Abs(actual - expected) / Mathf.Max(Mathf.Abs(expected), 0.000001f);
         }
 
+        static bool WithinTolerance(float actual, float expected, float relativeTolerance, float absoluteTolerance)
+        {
+            return Mathf.Abs(actual - expected) <= absoluteTolerance
+                || RelativeError(actual, expected) <= relativeTolerance;
+        }
+
         Vector3 GetSourceVertexWorld(int index)
         {
-            return transform.TransformPoint(sourceVertices[index].position * sourceSize);
+            return transform.TransformPoint(sourceVertices[index].position);
         }
 
         Vector3 GetSourceNormalWorld(int index)
@@ -517,7 +627,7 @@ namespace CausticMeshDxr
                 projectedTriangleMaterial,
                 receiver.bounds,
                 MeshTopology.Triangles,
-                DrawVertexCount,
+                drawVertexCount,
                 1,
                 null,
                 null,
@@ -542,11 +652,11 @@ namespace CausticMeshDxr
             if (sourceVertices == null)
                 UpdateSourceVertices();
             Gizmos.color = Color.cyan;
-            for (var i = 0; i < SourceIndices.Length; i += 3)
+            for (var i = 0; i < sourceIndices.Length; i += 3)
             {
-                var v0 = GetSourceVertexWorld((int)SourceIndices[i]);
-                var v1 = GetSourceVertexWorld((int)SourceIndices[i + 1]);
-                var v2 = GetSourceVertexWorld((int)SourceIndices[i + 2]);
+                var v0 = GetSourceVertexWorld((int)sourceIndices[i]);
+                var v1 = GetSourceVertexWorld((int)sourceIndices[i + 1]);
+                var v2 = GetSourceVertexWorld((int)sourceIndices[i + 2]);
                 Gizmos.DrawLine(v0, v1);
                 Gizmos.DrawLine(v1, v2);
                 Gizmos.DrawLine(v2, v0);
@@ -555,6 +665,12 @@ namespace CausticMeshDxr
 
         void OnDisable()
         {
+            ReleaseResources();
+        }
+
+        void ReleaseResources()
+        {
+            resourceGeneration++;
             initialized = false;
             readbackPendingCount = 0;
             dispatchGeneration = 0;

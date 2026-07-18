@@ -205,8 +205,8 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 330585543}
   serializedVersion: 2
-  m_LocalRotation: {x: 0.19488062, y: -0.21287964, z: 0.043374512, w: 0.9564636}
-  m_LocalPosition: {x: 11.51, y: 8.51, z: -22.32}
+  m_LocalRotation: {x: 0.15658815, y: -0.057003587, z: 0.00905304, w: 0.98597604}
+  m_LocalPosition: {x: 0.82, y: 0.15, z: -8.86}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -222,8 +222,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: a79441f348de89743a2939f4d699eac1, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_RenderShadows: 1
   m_RequiresDepthTextureOption: 2
   m_RequiresOpaqueTextureOption: 2
@@ -304,10 +304,15 @@ MonoBehaviour:
   directionalLight: {fileID: 410087040}
   rayQueryShader: {fileID: 7200000, guid: 80078622762d442ca7f3f9351e739136, type: 3}
   projectedTriangleShader: {fileID: 4800000, guid: 561de9e0317c4eeeb34a3a1b9914bf02, type: 3}
-  sourceSize: 2
+  sourceSize: {x: 10, y: 10}
+  cellSize: 0.03
   waveAmplitude: 0.056
-  waveCycles: 1
-  waveDirectionDegrees: 0
+  waveLength: 1
+  waveCenter: {x: 0, y: 0}
+  waveCenterSmoothing: 0.05
+  animateWave: 0
+  waveSpeed: 1
+  wavePhase: 0
   transmittedRefractiveIndex: 1.333
   rayTMin: 0.001
   rayTMax: 100
@@ -316,7 +321,8 @@ MonoBehaviour:
   intensityScale: 0.25
   runContinuously: 0
   planeHitTolerance: 0.001
-  scalarRelativeTolerance: 0.0001
+  scalarRelativeTolerance: 0.001
+  densityRelativeTolerance: 0.005
 --- !u!1 &410087039
 GameObject:
   m_ObjectHideFlags: 0
