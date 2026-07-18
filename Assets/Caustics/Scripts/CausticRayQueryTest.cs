@@ -1,6 +1,5 @@
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -12,7 +11,6 @@ namespace CausticMeshDxr
         const int ComputeThreadCount = 64;
         const int MaxCellCountPerAxis = 512;
         const uint ReceiverMask = 1;
-        const uint ReceiverInstanceId = 1;
 
         static readonly int AccelerationStructureId = Shader.PropertyToID("_AccelerationStructure");
         static readonly int SourceVerticesId = Shader.PropertyToID("_SourceVertices");
@@ -33,7 +31,7 @@ namespace CausticMeshDxr
         static readonly int IntensityScaleId = Shader.PropertyToID("_IntensityScale");
 
         [Header("Scene")]
-        [SerializeField] MeshRenderer receiver;
+        [SerializeField] MeshRenderer[] receivers;
         [SerializeField] Light directionalLight;
         [SerializeField] ComputeShader rayQueryShader;
         [SerializeField] Shader projectedTriangleShader;
@@ -64,7 +62,6 @@ namespace CausticMeshDxr
 
         [Header("Validation")]
         [SerializeField] bool runContinuously;
-        [SerializeField, Min(0)] float planeHitTolerance = 0.001f;
         [SerializeField, Min(0)] float scalarRelativeTolerance = 0.001f;
         [SerializeField, Min(0)] float densityRelativeTolerance = 0.005f;
 
@@ -87,7 +84,7 @@ namespace CausticMeshDxr
         Material projectedTriangleMaterial;
         Material sourceGridOutlineMaterial;
         CommandBuffer sourceGridOutlineCommandBuffer;
-        int receiverHandle = -1;
+        readonly List<ReceiverState> receiverStates = new();
         int traceKernel;
         int buildTrianglesKernel;
         bool initialized;
@@ -97,8 +94,19 @@ namespace CausticMeshDxr
         bool validationRefreshRequested;
         bool hasDispatched;
         Matrix4x4 lastSourceTransform;
-        Matrix4x4 lastReceiverTransform;
         Vector3 lastIncidentDirection;
+        RayHit[] validationHits;
+        TriangleResult[] validationTriangleResults;
+        uint validationHitsGeneration;
+        uint validationTrianglesGeneration;
+
+        sealed class ReceiverState
+        {
+            public MeshRenderer renderer;
+            public int handle;
+            public Matrix4x4 lastTransform;
+            public uint instanceId;
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         struct RayHit
@@ -183,7 +191,8 @@ namespace CausticMeshDxr
                     };
                 }
             }
-            sourceVertexBuffer?.SetData(sourceVertices);
+            if (sourceVertexBuffer != null && sourceVertexBuffer.count == vertexCount)
+                sourceVertexBuffer.SetData(sourceVertices);
         }
 
         uint[] CreateGridIndices()
@@ -261,11 +270,13 @@ namespace CausticMeshDxr
             sourceSize.x = Mathf.Max(0.001f, sourceSize.x);
             sourceSize.y = Mathf.Max(0.001f, sourceSize.y);
             cellSize = Mathf.Max(0.001f, cellSize);
-            if (initialized && GridTopologyChanged())
+            if (initialized && (GridTopologyChanged() || ReceiversChanged()))
                 ReleaseResources();
             RebuildGridData();
             if (!Application.isPlaying || !initialized)
                 UpdateSourceVertices();
+            if (!Application.isPlaying)
+                EnsureSourceGridOutlineResources();
             hasDispatched = false;
         }
 
@@ -282,9 +293,8 @@ namespace CausticMeshDxr
 
             var incidentDirection = directionalLight.transform.forward.normalized;
             var sourceTransform = transform.localToWorldMatrix;
-            var receiverTransform = receiver.transform.localToWorldMatrix;
             var changed = sourceTransform != lastSourceTransform
-                || receiverTransform != lastReceiverTransform
+                || ReceiverTransformsChanged()
                 || incidentDirection != lastIncidentDirection;
 
             if (!runContinuously && !animateWave && hasDispatched && !changed)
@@ -294,19 +304,54 @@ namespace CausticMeshDxr
                 return;
             }
 
-            if (receiverTransform != lastReceiverTransform)
-            {
-                accelerationStructure.UpdateInstanceTransform(receiverHandle, receiverTransform);
-                accelerationStructure.Build();
-            }
+            UpdateReceiverTransforms();
 
             Dispatch(incidentDirection);
             lastSourceTransform = sourceTransform;
-            lastReceiverTransform = receiverTransform;
             lastIncidentDirection = incidentDirection;
             hasDispatched = true;
             QueueProjectedGrid();
             QueueSourceGridOutline();
+        }
+
+        bool ReceiverTransformsChanged()
+        {
+            for (var i = 0; i < receiverStates.Count; i++)
+            {
+                if (receiverStates[i].renderer.transform.localToWorldMatrix != receiverStates[i].lastTransform)
+                    return true;
+            }
+            return false;
+        }
+
+        bool ReceiversChanged()
+        {
+            if (receivers == null || receivers.Length != receiverStates.Count)
+                return true;
+            for (var i = 0; i < receivers.Length; i++)
+            {
+                if (receivers[i] != receiverStates[i].renderer)
+                    return true;
+            }
+            return false;
+        }
+
+        void UpdateReceiverTransforms()
+        {
+            var changed = false;
+            for (var i = 0; i < receiverStates.Count; i++)
+            {
+                var state = receiverStates[i];
+                var transformMatrix = state.renderer.transform.localToWorldMatrix;
+                if (transformMatrix == state.lastTransform)
+                    continue;
+
+                accelerationStructure.UpdateInstanceTransform(state.handle, transformMatrix);
+                state.lastTransform = transformMatrix;
+                changed = true;
+            }
+            if (changed)
+                accelerationStructure.Build();
         }
 
         bool EnsureInitialized()
@@ -326,24 +371,15 @@ namespace CausticMeshDxr
                 enabled = false;
                 return false;
             }
-            if (receiver == null || directionalLight == null || rayQueryShader == null || projectedTriangleShader == null)
+            if (receivers == null || receivers.Length == 0 || directionalLight == null || rayQueryShader == null || projectedTriangleShader == null)
             {
-                Debug.LogError("Receiver, Directional Light, Ray Query Shader, and Projected Triangle Shader must be assigned.", this);
+                Debug.LogError("At least one Receiver, Directional Light, Ray Query Shader, and Projected Triangle Shader must be assigned.", this);
                 enabled = false;
                 return false;
             }
             if (directionalLight.type != LightType.Directional)
             {
                 Debug.LogError("The assigned light must be a Directional Light.", this);
-                enabled = false;
-                return false;
-            }
-
-            var meshFilter = receiver.GetComponent<MeshFilter>();
-            var mesh = meshFilter != null ? meshFilter.sharedMesh : null;
-            if (mesh == null || mesh.subMeshCount != 1)
-            {
-                Debug.LogError("The minimal receiver must have one mesh and one submesh.", receiver);
                 enabled = false;
                 return false;
             }
@@ -355,17 +391,44 @@ namespace CausticMeshDxr
                 layerMask = ~0,
             };
             accelerationStructure = new RayTracingAccelerationStructure(settings);
-            var instanceConfig = new RayTracingMeshInstanceConfig(mesh, 0, null)
+            receiverStates.Clear();
+            var uniqueReceivers = new HashSet<MeshRenderer>();
+            for (var receiverIndex = 0; receiverIndex < receivers.Length; receiverIndex++)
             {
-                subMeshFlags = RayTracingSubMeshFlags.Enabled | RayTracingSubMeshFlags.ClosestHitOnly,
-                enableTriangleCulling = false,
-                mask = ReceiverMask,
-            };
-            receiverHandle = accelerationStructure.AddInstance(
-                instanceConfig,
-                receiver.transform.localToWorldMatrix,
-                null,
-                ReceiverInstanceId);
+                var receiver = receivers[receiverIndex];
+                if (receiver == null || !uniqueReceivers.Add(receiver))
+                {
+                    Debug.LogError($"Receiver {receiverIndex} is null or duplicated.", this);
+                    ReleaseResources();
+                    enabled = false;
+                    return false;
+                }
+                var meshFilter = receiver != null ? receiver.GetComponent<MeshFilter>() : null;
+                var mesh = meshFilter != null ? meshFilter.sharedMesh : null;
+                if (mesh == null || mesh.subMeshCount != 1)
+                {
+                    Debug.LogError($"Receiver {receiverIndex} must have one mesh and one submesh.", receiver);
+                    ReleaseResources();
+                    enabled = false;
+                    return false;
+                }
+
+                var instanceConfig = new RayTracingMeshInstanceConfig(mesh, 0, null)
+                {
+                    subMeshFlags = RayTracingSubMeshFlags.Enabled | RayTracingSubMeshFlags.ClosestHitOnly,
+                    enableTriangleCulling = false,
+                    mask = ReceiverMask,
+                };
+                var instanceId = (uint)(receiverIndex + 1);
+                var receiverTransform = receiver.transform.localToWorldMatrix;
+                receiverStates.Add(new ReceiverState
+                {
+                    renderer = receiver,
+                    handle = accelerationStructure.AddInstance(instanceConfig, receiverTransform, null, instanceId),
+                    lastTransform = receiverTransform,
+                    instanceId = instanceId,
+                });
+            }
             accelerationStructure.Build();
 
             UpdateSourceVertices();
@@ -395,13 +458,12 @@ namespace CausticMeshDxr
             buildTrianglesKernel = rayQueryShader.FindKernel("BuildTriangles");
             initialized = true;
             lastSourceTransform = transform.localToWorldMatrix;
-            lastReceiverTransform = receiver.transform.localToWorldMatrix;
             lastIncidentDirection = directionalLight.transform.forward.normalized;
 
             Debug.Log(
                 $"Caustic grid initialized with {vertexCount} shared vertices and {triangleCount} triangles "
                 + $"({cellCountX}x{cellCountZ} square cells, actual size {actualSourceSize.x:F3}x{actualSourceSize.y:F3}) "
-                + $"on {SystemInfo.graphicsDeviceName}.",
+                + $"with {receiverStates.Count} receivers on {SystemInfo.graphicsDeviceName}.",
                 this);
             return true;
         }
@@ -454,7 +516,12 @@ namespace CausticMeshDxr
                     Debug.LogError("Failed to read Ray Query results from the GPU.", this);
                     return;
                 }
-                ValidateHits(request.GetData<RayHit>(), incidentDirection);
+                var data = request.GetData<RayHit>();
+                validationHits = new RayHit[data.Length];
+                data.CopyTo(validationHits);
+                validationHitsGeneration = currentGeneration;
+                ValidateHits(validationHits);
+                TryValidateTriangles(currentGeneration, incidentDirection);
             });
             AsyncGPUReadback.Request(triangleResultBuffer, request =>
             {
@@ -470,7 +537,11 @@ namespace CausticMeshDxr
                     Debug.LogError("Failed to read caustic triangle results from the GPU.", this);
                     return;
                 }
-                ValidateTriangles(request.GetData<TriangleResult>(), incidentDirection);
+                var data = request.GetData<TriangleResult>();
+                validationTriangleResults = new TriangleResult[data.Length];
+                data.CopyTo(validationTriangleResults);
+                validationTrianglesGeneration = currentGeneration;
+                TryValidateTriangles(currentGeneration, incidentDirection);
             });
         }
 
@@ -492,73 +563,53 @@ namespace CausticMeshDxr
             }
         }
 
-        void ValidateHits(NativeArray<RayHit> hits, Vector3 incidentDirection)
+        void ValidateHits(RayHit[] hits)
         {
-            var receiverPlane = new Plane(receiver.transform.forward, receiver.transform.position);
-            var primitiveIds = new HashSet<uint>();
+            var receiverInstanceIds = new HashSet<uint>();
+            var receiverPrimitives = new HashSet<ulong>();
             var validCount = 0;
-            var maxError = 0f;
-
             for (var i = 0; i < vertexCount; i++)
             {
-                var origin = GetSourceVertexWorld(i);
-                var refractedDirection = Refract(
-                    incidentDirection,
-                    GetSourceNormalWorld(i),
-                    1f / transmittedRefractiveIndex);
-                var expectedDistance = 0f;
-                var expectedValid = refractedDirection != Vector3.zero
-                    && receiverPlane.Raycast(new Ray(origin, refractedDirection), out expectedDistance)
-                    && expectedDistance >= rayTMin
-                    && expectedDistance <= rayTMax;
                 var hit = hits[i];
-                if (!expectedValid || hit.valid == 0 || hit.instanceId != ReceiverInstanceId)
+                if (hit.valid == 0)
                     continue;
 
-                var expectedPosition = origin + refractedDirection * expectedDistance;
-                maxError = Mathf.Max(maxError, Vector3.Distance(expectedPosition, hit.position));
-                primitiveIds.Add(hit.primitiveIndex);
+                receiverInstanceIds.Add(hit.instanceId);
+                receiverPrimitives.Add(((ulong)hit.instanceId << 32) | hit.primitiveIndex);
                 validCount++;
             }
 
-            if (validCount == vertexCount && maxError <= planeHitTolerance)
-            {
-                Debug.Log(
-                    $"Caustic grid Ray Query validation passed: {validCount}/{vertexCount} vertices, "
-                    + $"{primitiveIds.Count} receiver primitives, max error={maxError:E3}.",
-                    this);
-            }
-            else
-            {
+            if (validCount == 0)
                 Debug.LogError(
-                    $"Caustic grid Ray Query validation failed: {validCount}/{vertexCount} vertices, max error={maxError:E3}.",
+                    $"Caustic grid Ray Query produced no receiver hits for {vertexCount} vertices.",
                     this);
-            }
+            else
+                Debug.Log(
+                    $"Caustic grid Ray Query completed: {validCount}/{vertexCount} vertices hit "
+                    + $"{receiverInstanceIds.Count}/{receiverStates.Count} receivers and "
+                    + $"{receiverPrimitives.Count} receiver primitives.",
+                    this);
         }
 
-        void ValidateTriangles(NativeArray<TriangleResult> results, Vector3 incidentDirection)
+        void TryValidateTriangles(uint generation, Vector3 incidentDirection)
         {
-            var receiverPlane = new Plane(receiver.transform.forward, receiver.transform.position);
-            var projected = new Vector3[vertexCount];
-            var projectedValid = true;
-            for (var i = 0; i < vertexCount; i++)
-            {
-                var origin = GetSourceVertexWorld(i);
-                var refractedDirection = Refract(
-                    incidentDirection,
-                    GetSourceNormalWorld(i),
-                    1f / transmittedRefractiveIndex);
-                var distance = 0f;
-                projectedValid &= refractedDirection != Vector3.zero
-                    && receiverPlane.Raycast(new Ray(origin, refractedDirection), out distance)
-                    && distance >= rayTMin
-                    && distance <= rayTMax;
-                projected[i] = origin + refractedDirection * distance;
-            }
+            if (validationHits == null
+                || validationTriangleResults == null
+                || validationHitsGeneration != generation
+                || validationTrianglesGeneration != generation)
+                return;
+
+            ValidateTriangles(validationTriangleResults, validationHits, incidentDirection);
+        }
+
+        void ValidateTriangles(TriangleResult[] results, RayHit[] hits, Vector3 incidentDirection)
+        {
 
             var validatedCount = 0;
             var drawableCount = 0;
             var degenerateCount = 0;
+            var missCount = 0;
+            var crossReceiverCount = 0;
             var firstMismatch = -1;
             var maxIncidentAreaError = 0f;
             var maxReceiverAreaError = 0f;
@@ -579,22 +630,34 @@ namespace CausticMeshDxr
                 var x0 = GetSourceVertexWorld(i0);
                 var x1 = GetSourceVertexWorld(i1);
                 var x2 = GetSourceVertexWorld(i2);
+                var h0 = hits[i0];
+                var h1 = hits[i1];
+                var h2 = hits[i2];
+                var allHit = h0.valid != 0 && h1.valid != 0 && h2.valid != 0;
+                var sameReceiver = allHit
+                    && h0.instanceId == h1.instanceId
+                    && h1.instanceId == h2.instanceId;
                 var expectedIncidentArea = 0.5f * Mathf.Max(
                     0,
                     Vector3.Dot(-incidentDirection.normalized, Vector3.Cross(x1 - x0, x2 - x0)));
-                var expectedReceiverArea = projectedValid
-                    ? 0.5f * Vector3.Cross(projected[i1] - projected[i0], projected[i2] - projected[i0]).magnitude
+                var expectedReceiverArea = sameReceiver
+                    ? 0.5f * Vector3.Cross(h1.position - h0.position, h2.position - h0.position).magnitude
                     : 0;
                 var expectedIntensity = expectedIncidentArea / Mathf.Max(expectedReceiverArea, minReceiverArea);
                 var result = results[triangleIndex];
-                var expectedDrawable = projectedValid
+                var expectedDrawable = sameReceiver
                     && expectedIncidentArea > 0
                     && expectedReceiverArea > 0;
                 var gpuDrawable = result.valid != 0;
                 if (!expectedDrawable && !gpuDrawable)
                 {
                     validatedCount++;
-                    degenerateCount++;
+                    if (!allHit)
+                        missCount++;
+                    else if (!sameReceiver)
+                        crossReceiverCount++;
+                    else
+                        degenerateCount++;
                     continue;
                 }
 
@@ -641,7 +704,8 @@ namespace CausticMeshDxr
             {
                 Debug.Log(
                     $"Caustic grid density validation passed: {validatedCount}/{triangleCount} triangles "
-                    + $"({drawableCount} drawable, {degenerateCount} degenerate), "
+                    + $"({drawableCount} drawable, {missCount} missed, "
+                    + $"{crossReceiverCount} cross-receiver, {degenerateCount} degenerate), "
                     + $"C={minIntensity:F6}..{maxIntensity:F6}, "
                     + $"GPU/CPU energy error={energyValidationError:E3}, "
                     + $"clamped energy retention={energyRetention:P3}.",
@@ -689,7 +753,7 @@ namespace CausticMeshDxr
 
             Graphics.DrawProcedural(
                 projectedTriangleMaterial,
-                receiver.bounds,
+                GetReceiverBounds(),
                 MeshTopology.Triangles,
                 drawVertexCount,
                 1,
@@ -698,6 +762,17 @@ namespace CausticMeshDxr
                 ShadowCastingMode.Off,
                 false,
                 gameObject.layer);
+        }
+
+        Bounds GetReceiverBounds()
+        {
+            if (receiverStates.Count == 0)
+                return new Bounds(transform.position, Vector3.one);
+
+            var bounds = receiverStates[0].renderer.bounds;
+            for (var i = 1; i < receiverStates.Count; i++)
+                bounds.Encapsulate(receiverStates[i].renderer.bounds);
+            return bounds;
         }
 
         void QueueSourceGridOutline()
@@ -813,7 +888,9 @@ namespace CausticMeshDxr
             readbackPendingCount = 0;
             dispatchGeneration = 0;
             validationRefreshRequested = false;
-            receiverHandle = -1;
+            receiverStates.Clear();
+            validationHits = null;
+            validationTriangleResults = null;
             sourceVertexBuffer?.Dispose();
             sourceVertexBuffer = null;
             sourceIndexBuffer?.Dispose();

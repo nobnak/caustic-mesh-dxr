@@ -205,8 +205,8 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 330585543}
   serializedVersion: 2
-  m_LocalRotation: {x: 0.18112804, y: -0.12940085, z: 0.024048682, w: 0.97461265}
-  m_LocalPosition: {x: -0.67856145, y: 0.9149445, z: -6.5655284}
+  m_LocalRotation: {x: 0.1552954, y: -0.13879295, z: 0.022042787, w: 0.977821}
+  m_LocalPosition: {x: 3.1089032, y: -0.16079864, z: -4.1019297}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -300,14 +300,16 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 197a51e4281542509b55e1a2cf727b72, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  receiver: {fileID: 1052510686}
+  receivers:
+  - {fileID: 1052510686}
+  - {fileID: 814391516}
   directionalLight: {fileID: 410087040}
   rayQueryShader: {fileID: 7200000, guid: 80078622762d442ca7f3f9351e739136, type: 3}
   projectedTriangleShader: {fileID: 4800000, guid: 561de9e0317c4eeeb34a3a1b9914bf02, type: 3}
   sourceGridOutlineShader: {fileID: 4800000, guid: d5d9f9c1853c47a1b7c45a0f7be6d201, type: 3}
   sourceSize: {x: 10, y: 10}
   cellSize: 0.1
-  waveAmplitude: 0.056
+  waveAmplitude: 0.02
   waveLength: 1
   waveCenter: {x: 0, y: 0}
   waveCenterSmoothing: 0.05
@@ -323,7 +325,6 @@ MonoBehaviour:
   showSourceGrid: 1
   sourceGridColor: {r: 0, g: 1, b: 1, a: 1}
   runContinuously: 0
-  planeHitTolerance: 0.001
   scalarRelativeTolerance: 0.001
   densityRelativeTolerance: 0.005
 --- !u!1 &410087039
@@ -471,7 +472,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 0
+  m_IsActive: 1
 --- !u!135 &814391515
 SphereCollider:
   m_ObjectHideFlags: 0
@@ -559,8 +560,8 @@ Transform:
   m_GameObject: {fileID: 814391514}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: -3, z: 0}
-  m_LocalScale: {x: 5, y: 5, z: 5}
+  m_LocalPosition: {x: 2, y: -1.5, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
