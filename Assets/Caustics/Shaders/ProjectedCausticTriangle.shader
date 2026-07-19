@@ -29,6 +29,8 @@ Shader "Hidden/Caustics/Projected Triangle"
                 uint primitiveIndex;
                 uint valid;
                 uint padding;
+                float3 receiverNormal;
+                float normalPadding;
             };
 
             struct TriangleResult
@@ -38,7 +40,7 @@ Shader "Hidden/Caustics/Projected Triangle"
                 float receiverArea;
                 uint valid;
                 float3 renderNormal;
-                float padding;
+                uint receiverBoundary;
             };
 
             StructuredBuffer<uint> _SourceIndices;
@@ -48,12 +50,15 @@ Shader "Hidden/Caustics/Projected Triangle"
             float4 _Color;
             float _IntensityScale;
             float _SurfaceOffset;
+            int _ShowReceiverBoundaries;
+            float4 _ReceiverBoundaryColor;
 
             struct Varyings
             {
                 float4 positionCS : SV_POSITION;
                 nointerpolation float intensity : TEXCOORD0;
                 nointerpolation float valid : TEXCOORD1;
+                nointerpolation float receiverBoundary : TEXCOORD2;
             };
 
             Varyings Vert(uint vertexId : SV_VertexID)
@@ -67,12 +72,15 @@ Shader "Hidden/Caustics/Projected Triangle"
                 output.positionCS = mul(UNITY_MATRIX_VP, float4(positionWS, 1));
                 output.intensity = triangleResult.intensity * _IntensityScale;
                 output.valid = triangleResult.valid;
+                output.receiverBoundary = triangleResult.receiverBoundary;
                 return output;
             }
 
             float4 Frag(Varyings input) : SV_Target
             {
                 clip(input.valid - 0.5);
+                if (_ShowReceiverBoundaries != 0 && input.receiverBoundary > 0.5)
+                    return _ReceiverBoundaryColor;
                 return _Color * input.intensity;
             }
             ENDHLSL

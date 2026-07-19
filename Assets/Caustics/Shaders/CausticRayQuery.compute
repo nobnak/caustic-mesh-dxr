@@ -15,6 +15,8 @@ struct RayHit
     uint primitiveIndex;
     uint valid;
     uint padding;
+    float3 receiverNormal;
+    float normalPadding;
 };
 
 struct TriangleResult
@@ -24,7 +26,7 @@ struct TriangleResult
     float receiverArea;
     uint valid;
     float3 renderNormal;
-    float padding;
+    uint receiverBoundary;
 };
 
 struct SourceVertex
@@ -40,6 +42,8 @@ RWStructuredBuffer<TriangleResult> _TriangleResults;
 StructuredBuffer<uint> _VertexTriangleOffsets;
 StructuredBuffer<uint> _VertexTriangleIndices;
 RWStructuredBuffer<float3> _RenderNormals;
+StructuredBuffer<uint> _ReceiverPrimitiveOffsets;
+StructuredBuffer<float3> _ReceiverPrimitiveNormals;
 
 float4x4 _SourceLocalToWorld;
 float4x4 _SourceNormalToWorld;
@@ -50,6 +54,15 @@ float _Eta;
 float _RayTMin;
 float _RayTMax;
 float _MinReceiverArea;
+float _ReceiverBoundaryNormalCos;
+
+bool CrossesReceiverPlane(RayHit a, RayHit b)
+{
+    if (a.primitiveIndex == b.primitiveIndex)
+        return false;
+
+    return abs(dot(a.receiverNormal, b.receiverNormal)) < _ReceiverBoundaryNormalCos;
+}
 
 float3 GetSourceVertexWorld(uint index)
 {
@@ -93,6 +106,8 @@ void TraceVertices(uint3 dispatchThreadId : SV_DispatchThreadID)
             result.position = origin + direction * result.distance;
             result.instanceId = rayQuery.CommittedInstanceID();
             result.primitiveIndex = rayQuery.CommittedPrimitiveIndex();
+            result.receiverNormal = _ReceiverPrimitiveNormals[
+                _ReceiverPrimitiveOffsets[result.instanceId] + result.primitiveIndex];
             result.valid = 1;
         }
     }
@@ -127,6 +142,9 @@ void BuildTriangles(uint3 dispatchThreadId : SV_DispatchThreadID)
         result.receiverArea = 0.5 * length(cross(h1.position - h0.position, h2.position - h0.position));
         result.intensity = result.incidentArea / max(result.receiverArea, _MinReceiverArea);
         result.valid = result.incidentArea > 0 && result.receiverArea > 0;
+        result.receiverBoundary = CrossesReceiverPlane(h0, h1)
+            || CrossesReceiverPlane(h1, h2)
+            || CrossesReceiverPlane(h2, h0);
         const float3 renderAreaVector = cross(h1.position - h0.position, h2.position - h0.position);
         const float renderAreaLengthSq = dot(renderAreaVector, renderAreaVector);
         const float3 rayDirection = normalize(

@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -21,6 +22,8 @@ namespace CausticMeshDxr
         static readonly int VertexTriangleOffsetsId = Shader.PropertyToID("_VertexTriangleOffsets");
         static readonly int VertexTriangleIndicesId = Shader.PropertyToID("_VertexTriangleIndices");
         static readonly int RenderNormalsId = Shader.PropertyToID("_RenderNormals");
+        static readonly int ReceiverPrimitiveOffsetsId = Shader.PropertyToID("_ReceiverPrimitiveOffsets");
+        static readonly int ReceiverPrimitiveNormalsId = Shader.PropertyToID("_ReceiverPrimitiveNormals");
         static readonly int SourceLocalToWorldId = Shader.PropertyToID("_SourceLocalToWorld");
         static readonly int SourceNormalToWorldId = Shader.PropertyToID("_SourceNormalToWorld");
         static readonly int VertexCountId = Shader.PropertyToID("_VertexCount");
@@ -33,6 +36,9 @@ namespace CausticMeshDxr
         static readonly int ColorId = Shader.PropertyToID("_Color");
         static readonly int IntensityScaleId = Shader.PropertyToID("_IntensityScale");
         static readonly int SurfaceOffsetId = Shader.PropertyToID("_SurfaceOffset");
+        static readonly int ReceiverBoundaryNormalCosId = Shader.PropertyToID("_ReceiverBoundaryNormalCos");
+        static readonly int ShowReceiverBoundariesId = Shader.PropertyToID("_ShowReceiverBoundaries");
+        static readonly int ReceiverBoundaryColorId = Shader.PropertyToID("_ReceiverBoundaryColor");
 
         [Header("Scene")]
         [SerializeField] MeshRenderer[] receivers;
@@ -62,6 +68,9 @@ namespace CausticMeshDxr
         [SerializeField] Color causticColor = new(1, 0.7f, 0.1f, 1);
         [SerializeField, Min(0)] float intensityScale = 0.25f;
         [SerializeField, Min(0)] float surfaceOffset = 0.002f;
+        [SerializeField] bool showReceiverBoundaries;
+        [SerializeField] Color receiverBoundaryColor = Color.magenta;
+        [SerializeField, Range(0, 45)] float receiverBoundaryNormalAngle = 5;
         [SerializeField] bool showSourceGrid = true;
         [SerializeField] Color sourceGridColor = Color.cyan;
 
@@ -79,6 +88,8 @@ namespace CausticMeshDxr
         GraphicsBuffer vertexTriangleOffsetBuffer;
         GraphicsBuffer vertexTriangleIndexBuffer;
         GraphicsBuffer renderNormalBuffer;
+        GraphicsBuffer receiverPrimitiveOffsetBuffer;
+        GraphicsBuffer receiverPrimitiveNormalBuffer;
         SourceVertex[] sourceVertices;
         uint[] sourceIndices;
         uint[] sourceLineIndices;
@@ -117,6 +128,8 @@ namespace CausticMeshDxr
             public int handle;
             public Matrix4x4 lastTransform;
             public uint instanceId;
+            public int primitiveOffset;
+            public Vector3[] localPrimitiveNormals;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -128,6 +141,8 @@ namespace CausticMeshDxr
             public uint primitiveIndex;
             public uint valid;
             public uint padding;
+            public Vector3 receiverNormal;
+            public float normalPadding;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -145,7 +160,7 @@ namespace CausticMeshDxr
             public float receiverArea;
             public uint valid;
             public Vector3 renderNormal;
-            public float padding;
+            public uint receiverBoundary;
         }
 
         void RebuildGridData()
@@ -387,7 +402,48 @@ namespace CausticMeshDxr
                 changed = true;
             }
             if (changed)
+            {
                 accelerationStructure.Build();
+                UpdateReceiverPrimitiveNormals();
+            }
+        }
+
+        void UpdateReceiverPrimitiveNormals()
+        {
+            if (receiverPrimitiveNormalBuffer == null)
+                return;
+
+            var worldNormals = new Vector3[receiverPrimitiveNormalBuffer.count];
+            foreach (var state in receiverStates)
+            {
+                var normalMatrix = state.renderer.transform.worldToLocalMatrix.transpose;
+                for (var primitiveIndex = 0; primitiveIndex < state.localPrimitiveNormals.Length; primitiveIndex++)
+                {
+                    worldNormals[state.primitiveOffset + primitiveIndex] = normalMatrix
+                        .MultiplyVector(state.localPrimitiveNormals[primitiveIndex]).normalized;
+                }
+            }
+            receiverPrimitiveNormalBuffer.SetData(worldNormals);
+        }
+
+        static Vector3[] CreatePrimitiveNormals(Mesh mesh)
+        {
+            using var meshDataArray = Mesh.AcquireReadOnlyMeshData(mesh);
+            var meshData = meshDataArray[0];
+            using var vertices = new NativeArray<Vector3>(meshData.vertexCount, Allocator.Temp);
+            var subMesh = meshData.GetSubMesh(0);
+            using var indices = new NativeArray<int>(subMesh.indexCount, Allocator.Temp);
+            meshData.GetVertices(vertices);
+            meshData.GetIndices(indices, 0);
+            var normals = new Vector3[indices.Length / 3];
+            for (var primitiveIndex = 0; primitiveIndex < normals.Length; primitiveIndex++)
+            {
+                var indexOffset = primitiveIndex * 3;
+                normals[primitiveIndex] = Vector3.Cross(
+                    vertices[indices[indexOffset + 1]] - vertices[indices[indexOffset]],
+                    vertices[indices[indexOffset + 2]] - vertices[indices[indexOffset]]).normalized;
+            }
+            return normals;
         }
 
         bool EnsureInitialized()
@@ -429,6 +485,8 @@ namespace CausticMeshDxr
             accelerationStructure = new RayTracingAccelerationStructure(settings);
             receiverStates.Clear();
             var uniqueReceivers = new HashSet<MeshRenderer>();
+            var primitiveOffsets = new uint[receivers.Length + 2];
+            var totalPrimitiveCount = 0;
             for (var receiverIndex = 0; receiverIndex < receivers.Length; receiverIndex++)
             {
                 var receiver = receivers[receiverIndex];
@@ -448,6 +506,7 @@ namespace CausticMeshDxr
                     enabled = false;
                     return false;
                 }
+                var primitiveNormals = CreatePrimitiveNormals(mesh);
 
                 var instanceConfig = new RayTracingMeshInstanceConfig(mesh, 0, null)
                 {
@@ -456,6 +515,7 @@ namespace CausticMeshDxr
                     mask = ReceiverMask,
                 };
                 var instanceId = (uint)(receiverIndex + 1);
+                primitiveOffsets[instanceId] = (uint)totalPrimitiveCount;
                 var receiverTransform = receiver.transform.localToWorldMatrix;
                 receiverStates.Add(new ReceiverState
                 {
@@ -463,9 +523,24 @@ namespace CausticMeshDxr
                     handle = accelerationStructure.AddInstance(instanceConfig, receiverTransform, null, instanceId),
                     lastTransform = receiverTransform,
                     instanceId = instanceId,
+                    primitiveOffset = totalPrimitiveCount,
+                    localPrimitiveNormals = primitiveNormals,
                 });
+                totalPrimitiveCount += primitiveNormals.Length;
             }
+            primitiveOffsets[receivers.Length + 1] = (uint)totalPrimitiveCount;
             accelerationStructure.Build();
+
+            receiverPrimitiveOffsetBuffer = new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured,
+                primitiveOffsets.Length,
+                sizeof(uint));
+            receiverPrimitiveOffsetBuffer.SetData(primitiveOffsets);
+            receiverPrimitiveNormalBuffer = new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured,
+                Mathf.Max(1, totalPrimitiveCount),
+                Marshal.SizeOf<Vector3>());
+            UpdateReceiverPrimitiveNormals();
 
             UpdateSourceVertices();
             sourceVertexBuffer ??= new GraphicsBuffer(
@@ -529,6 +604,8 @@ namespace CausticMeshDxr
             rayQueryShader.SetRayTracingAccelerationStructure(traceKernel, AccelerationStructureId, accelerationStructure);
             rayQueryShader.SetBuffer(traceKernel, SourceVerticesId, sourceVertexBuffer);
             rayQueryShader.SetBuffer(traceKernel, HitsId, hitBuffer);
+            rayQueryShader.SetBuffer(traceKernel, ReceiverPrimitiveOffsetsId, receiverPrimitiveOffsetBuffer);
+            rayQueryShader.SetBuffer(traceKernel, ReceiverPrimitiveNormalsId, receiverPrimitiveNormalBuffer);
             rayQueryShader.SetBuffer(buildTrianglesKernel, SourceVerticesId, sourceVertexBuffer);
             rayQueryShader.SetBuffer(buildTrianglesKernel, SourceIndicesId, sourceIndexBuffer);
             rayQueryShader.SetBuffer(buildTrianglesKernel, HitsId, hitBuffer);
@@ -548,6 +625,7 @@ namespace CausticMeshDxr
             rayQueryShader.SetFloat(RayTMinId, rayTMin);
             rayQueryShader.SetFloat(RayTMaxId, rayTMax);
             rayQueryShader.SetFloat(MinReceiverAreaId, minReceiverArea);
+            rayQueryShader.SetFloat(ReceiverBoundaryNormalCosId, Mathf.Cos(receiverBoundaryNormalAngle * Mathf.Deg2Rad));
             rayQueryShader.Dispatch(traceKernel, DivideRoundUp(vertexCount, ComputeThreadCount), 1, 1);
             rayQueryShader.Dispatch(buildTrianglesKernel, DivideRoundUp(triangleCount, ComputeThreadCount), 1, 1);
             rayQueryShader.Dispatch(buildRenderNormalsKernel, DivideRoundUp(vertexCount, ComputeThreadCount), 1, 1);
@@ -555,6 +633,8 @@ namespace CausticMeshDxr
             projectedTriangleMaterial.SetColor(ColorId, causticColor);
             projectedTriangleMaterial.SetFloat(IntensityScaleId, intensityScale);
             projectedTriangleMaterial.SetFloat(SurfaceOffsetId, surfaceOffset);
+            projectedTriangleMaterial.SetInt(ShowReceiverBoundariesId, showReceiverBoundaries ? 1 : 0);
+            projectedTriangleMaterial.SetColor(ReceiverBoundaryColorId, receiverBoundaryColor);
             if (readbackPendingCount != 0)
             {
                 validationRefreshRequested = true;
@@ -670,6 +750,7 @@ namespace CausticMeshDxr
             var degenerateCount = 0;
             var missCount = 0;
             var crossReceiverCount = 0;
+            var receiverBoundaryCount = 0;
             var firstMismatch = -1;
             var maxIncidentAreaError = 0f;
             var maxReceiverAreaError = 0f;
@@ -705,6 +786,10 @@ namespace CausticMeshDxr
                     : 0;
                 var expectedIntensity = expectedIncidentArea / Mathf.Max(expectedReceiverArea, minReceiverArea);
                 var result = results[triangleIndex];
+                var expectedReceiverBoundary = sameReceiver && (
+                    CrossesReceiverPlane(h0, h1)
+                    || CrossesReceiverPlane(h1, h2)
+                    || CrossesReceiverPlane(h2, h0));
                 var expectedDrawable = sameReceiver
                     && expectedIncidentArea > 0
                     && expectedReceiverArea > 0;
@@ -729,6 +814,7 @@ namespace CausticMeshDxr
                 maxIntensityError = Mathf.Max(maxIntensityError, intensityError);
                 var valuesMatch = expectedDrawable
                     && gpuDrawable
+                    && (result.receiverBoundary != 0) == expectedReceiverBoundary
                     && incidentAreaError <= scalarRelativeTolerance
                     && WithinTolerance(
                         result.receiverArea,
@@ -749,6 +835,8 @@ namespace CausticMeshDxr
 
                 validatedCount++;
                 drawableCount++;
+                if (result.receiverBoundary != 0)
+                    receiverBoundaryCount++;
                 minIntensity = Mathf.Min(minIntensity, result.intensity);
                 maxIntensity = Mathf.Max(maxIntensity, result.intensity);
                 totalIncidentEnergy += result.incidentArea;
@@ -765,7 +853,8 @@ namespace CausticMeshDxr
                 Debug.Log(
                     $"Caustic grid density validation passed: {validatedCount}/{triangleCount} triangles "
                     + $"({drawableCount} drawable, {missCount} missed, "
-                    + $"{crossReceiverCount} cross-receiver, {degenerateCount} degenerate), "
+                    + $"{crossReceiverCount} cross-receiver, {receiverBoundaryCount} receiver-boundary, "
+                    + $"{degenerateCount} degenerate), "
                     + $"C={minIntensity:F6}..{maxIntensity:F6}, "
                     + $"GPU/CPU energy error={energyValidationError:E3}, "
                     + $"clamped energy retention={energyRetention:P3}.",
@@ -788,6 +877,15 @@ namespace CausticMeshDxr
         static float RelativeError(float actual, float expected)
         {
             return Mathf.Abs(actual - expected) / Mathf.Max(Mathf.Abs(expected), 0.000001f);
+        }
+
+        bool CrossesReceiverPlane(RayHit a, RayHit b)
+        {
+            if (a.primitiveIndex == b.primitiveIndex)
+                return false;
+
+            var normalAlignment = Mathf.Abs(Vector3.Dot(a.receiverNormal, b.receiverNormal));
+            return normalAlignment < Mathf.Cos(receiverBoundaryNormalAngle * Mathf.Deg2Rad);
         }
 
         static bool WithinTolerance(float actual, float expected, float relativeTolerance, float absoluteTolerance)
@@ -967,6 +1065,10 @@ namespace CausticMeshDxr
             vertexTriangleIndexBuffer = null;
             renderNormalBuffer?.Dispose();
             renderNormalBuffer = null;
+            receiverPrimitiveOffsetBuffer?.Dispose();
+            receiverPrimitiveOffsetBuffer = null;
+            receiverPrimitiveNormalBuffer?.Dispose();
+            receiverPrimitiveNormalBuffer = null;
             accelerationStructure?.Dispose();
             accelerationStructure = null;
             if (projectedTriangleMaterial != null)
