@@ -1,6 +1,10 @@
 #pragma kernel TraceVertices
 #pragma kernel BuildTriangles
-#pragma kernel BuildRenderNormals
+#pragma kernel ClearEdgeFlags
+#pragma kernel MarkBoundaryEdges
+#pragma kernel TraceEdgeMidpoints
+#pragma kernel BuildProjectedTriangles
+#pragma kernel BuildOutputArgs
 #pragma require inlineraytracing
 
 #include "UnityRayQuery.cginc"
@@ -35,13 +39,32 @@ struct SourceVertex
     float3 normal;
 };
 
+struct SourceEdge
+{
+    uint vertex0;
+    uint vertex1;
+};
+
+struct ProjectedResult
+{
+    float intensity;
+    uint receiverBoundary;
+    uint valid;
+    uint padding;
+};
+
 StructuredBuffer<SourceVertex> _SourceVertices;
 StructuredBuffer<uint> _SourceIndices;
 RWStructuredBuffer<RayHit> _Hits;
 RWStructuredBuffer<TriangleResult> _TriangleResults;
-StructuredBuffer<uint> _VertexTriangleOffsets;
-StructuredBuffer<uint> _VertexTriangleIndices;
-RWStructuredBuffer<float3> _RenderNormals;
+StructuredBuffer<SourceEdge> _SourceEdges;
+StructuredBuffer<uint> _TriangleEdges;
+RWStructuredBuffer<uint> _EdgeFlags;
+RWStructuredBuffer<RayHit> _EdgeHits;
+RWStructuredBuffer<uint> _ProjectedIndices;
+RWStructuredBuffer<ProjectedResult> _ProjectedResults;
+RWStructuredBuffer<uint> _OutputCounter;
+RWStructuredBuffer<uint> _OutputArgs;
 StructuredBuffer<uint> _ReceiverPrimitiveOffsets;
 StructuredBuffer<float3> _ReceiverPrimitiveNormals;
 
@@ -55,13 +78,19 @@ float _RayTMin;
 float _RayTMax;
 float _MinReceiverArea;
 float _ReceiverBoundaryNormalCos;
+uint _EdgeCount;
+uint _MaxOutputTriangles;
+uint _EnableSubdivision;
 
-bool CrossesReceiverPlane(RayHit a, RayHit b)
+uint GetBoundaryReason(RayHit a, RayHit b)
 {
+    if (a.valid == 0 || b.valid == 0)
+        return 0;
+    if (a.instanceId != b.instanceId)
+        return 2;
     if (a.primitiveIndex == b.primitiveIndex)
-        return false;
-
-    return abs(dot(a.receiverNormal, b.receiverNormal)) < _ReceiverBoundaryNormalCos;
+        return 0;
+    return abs(dot(a.receiverNormal, b.receiverNormal)) < _ReceiverBoundaryNormalCos ? 1 : 0;
 }
 
 float3 GetSourceVertexWorld(uint index)
@@ -74,6 +103,41 @@ float3 GetSourceNormalWorld(uint index)
     return normalize(mul((float3x3)_SourceNormalToWorld, _SourceVertices[index].normal));
 }
 
+RayHit TraceSourcePoint(float3 origin, float3 sourceNormal)
+{
+    RayHit result = (RayHit)0;
+    const float3 direction = refract(normalize(_IncidentDirection), sourceNormal, _Eta);
+    if (dot(direction, direction) == 0)
+        return result;
+
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = _RayTMin;
+    ray.TMax = _RayTMax;
+
+    const uint rayFlags = RAY_FLAG_FORCE_OPAQUE;
+    UnityRayQuery<rayFlags> rayQuery;
+    rayQuery.TraceRayInline(_AccelerationStructure, rayFlags, 1, ray);
+    while (rayQuery.Proceed())
+    {
+    }
+
+    if (rayQuery.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
+        return result;
+
+    result.distance = rayQuery.CommittedRayT();
+    result.position = origin + direction * result.distance;
+    result.instanceId = rayQuery.CommittedInstanceID();
+    result.primitiveIndex = rayQuery.CommittedPrimitiveIndex();
+    result.receiverNormal = _ReceiverPrimitiveNormals[
+        _ReceiverPrimitiveOffsets[result.instanceId] + result.primitiveIndex];
+    if (dot(result.receiverNormal, direction) > 0)
+        result.receiverNormal = -result.receiverNormal;
+    result.valid = 1;
+    return result;
+}
+
 [numthreads(64, 1, 1)]
 void TraceVertices(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -81,38 +145,8 @@ void TraceVertices(uint3 dispatchThreadId : SV_DispatchThreadID)
     if (index >= _VertexCount)
         return;
 
-    RayHit result = (RayHit)0;
     const float3 origin = GetSourceVertexWorld(index);
-    const float3 direction = refract(normalize(_IncidentDirection), GetSourceNormalWorld(index), _Eta);
-
-    if (dot(direction, direction) > 0)
-    {
-        RayDesc ray;
-        ray.Origin = origin;
-        ray.Direction = direction;
-        ray.TMin = _RayTMin;
-        ray.TMax = _RayTMax;
-
-        const uint rayFlags = RAY_FLAG_FORCE_OPAQUE;
-        UnityRayQuery<rayFlags> rayQuery;
-        rayQuery.TraceRayInline(_AccelerationStructure, rayFlags, 1, ray);
-        while (rayQuery.Proceed())
-        {
-        }
-
-        if (rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
-        {
-            result.distance = rayQuery.CommittedRayT();
-            result.position = origin + direction * result.distance;
-            result.instanceId = rayQuery.CommittedInstanceID();
-            result.primitiveIndex = rayQuery.CommittedPrimitiveIndex();
-            result.receiverNormal = _ReceiverPrimitiveNormals[
-                _ReceiverPrimitiveOffsets[result.instanceId] + result.primitiveIndex];
-            result.valid = 1;
-        }
-    }
-
-    _Hits[index] = result;
+    _Hits[index] = TraceSourcePoint(origin, GetSourceNormalWorld(index));
 }
 
 [numthreads(64, 1, 1)]
@@ -142,9 +176,9 @@ void BuildTriangles(uint3 dispatchThreadId : SV_DispatchThreadID)
         result.receiverArea = 0.5 * length(cross(h1.position - h0.position, h2.position - h0.position));
         result.intensity = result.incidentArea / max(result.receiverArea, _MinReceiverArea);
         result.valid = result.incidentArea > 0 && result.receiverArea > 0;
-        result.receiverBoundary = CrossesReceiverPlane(h0, h1)
-            || CrossesReceiverPlane(h1, h2)
-            || CrossesReceiverPlane(h2, h0);
+        result.receiverBoundary = GetBoundaryReason(h0, h1)
+            | GetBoundaryReason(h1, h2)
+            | GetBoundaryReason(h2, h0);
         const float3 renderAreaVector = cross(h1.position - h0.position, h2.position - h0.position);
         const float renderAreaLengthSq = dot(renderAreaVector, renderAreaVector);
         const float3 rayDirection = normalize(
@@ -161,30 +195,171 @@ void BuildTriangles(uint3 dispatchThreadId : SV_DispatchThreadID)
 }
 
 [numthreads(64, 1, 1)]
-void BuildRenderNormals(uint3 dispatchThreadId : SV_DispatchThreadID)
+void ClearEdgeFlags(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    const uint vertexIndex = dispatchThreadId.x;
-    if (vertexIndex >= _VertexCount)
+    if (dispatchThreadId.x < _EdgeCount)
+        _EdgeFlags[dispatchThreadId.x] = 0;
+}
+
+[numthreads(64, 1, 1)]
+void MarkBoundaryEdges(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    const uint triangleIndex = dispatchThreadId.x;
+    if (triangleIndex >= _TriangleCount || _EnableSubdivision == 0)
         return;
 
-    float3 normalSum = 0;
-    const uint adjacencyStart = _VertexTriangleOffsets[vertexIndex];
-    const uint adjacencyEnd = _VertexTriangleOffsets[vertexIndex + 1];
-    for (uint adjacencyIndex = adjacencyStart; adjacencyIndex < adjacencyEnd; adjacencyIndex++)
-    {
-        const TriangleResult triangleResult = _TriangleResults[_VertexTriangleIndices[adjacencyIndex]];
-        if (triangleResult.valid != 0)
-            normalSum += triangleResult.renderNormal * triangleResult.receiverArea;
-    }
+    const uint offset = triangleIndex * 3;
+    const RayHit h0 = _Hits[_SourceIndices[offset]];
+    const RayHit h1 = _Hits[_SourceIndices[offset + 1]];
+    const RayHit h2 = _Hits[_SourceIndices[offset + 2]];
+    const uint reason01 = GetBoundaryReason(h0, h1);
+    const uint reason12 = GetBoundaryReason(h1, h2);
+    const uint reason20 = GetBoundaryReason(h2, h0);
+    if (reason01 != 0)
+        InterlockedOr(_EdgeFlags[_TriangleEdges[offset]], reason01);
+    if (reason12 != 0)
+        InterlockedOr(_EdgeFlags[_TriangleEdges[offset + 1]], reason12);
+    if (reason20 != 0)
+        InterlockedOr(_EdgeFlags[_TriangleEdges[offset + 2]], reason20);
+}
 
-    const float normalLengthSq = dot(normalSum, normalSum);
-    if (normalLengthSq > 1e-16)
-    {
-        _RenderNormals[vertexIndex] = normalSum * rsqrt(normalLengthSq);
+[numthreads(64, 1, 1)]
+void TraceEdgeMidpoints(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    const uint edgeIndex = dispatchThreadId.x;
+    if (edgeIndex >= _EdgeCount || _EdgeFlags[edgeIndex] == 0)
         return;
-    }
 
-    const RayHit hit = _Hits[vertexIndex];
-    const float3 fallbackDirection = normalize(hit.position - GetSourceVertexWorld(vertexIndex));
-    _RenderNormals[vertexIndex] = -fallbackDirection;
+    const SourceEdge edge = _SourceEdges[edgeIndex];
+    const float3 position = 0.5 * (
+        GetSourceVertexWorld(edge.vertex0) + GetSourceVertexWorld(edge.vertex1));
+    const float3 normal = normalize(
+        GetSourceNormalWorld(edge.vertex0) + GetSourceNormalWorld(edge.vertex1));
+    _EdgeHits[edgeIndex] = TraceSourcePoint(position, normal);
+}
+
+RayHit GetProjectedHit(uint vertexReference)
+{
+    if (vertexReference < _VertexCount)
+        return _Hits[vertexReference];
+    return _EdgeHits[vertexReference - _VertexCount];
+}
+
+float3 GetProjectedSourcePosition(uint vertexReference)
+{
+    if (vertexReference < _VertexCount)
+        return GetSourceVertexWorld(vertexReference);
+    const SourceEdge edge = _SourceEdges[vertexReference - _VertexCount];
+    return 0.5 * (GetSourceVertexWorld(edge.vertex0) + GetSourceVertexWorld(edge.vertex1));
+}
+
+void EmitProjectedTriangle(uint r0, uint r1, uint r2)
+{
+    const RayHit h0 = GetProjectedHit(r0);
+    const RayHit h1 = GetProjectedHit(r1);
+    const RayHit h2 = GetProjectedHit(r2);
+    if (h0.valid == 0 || h1.valid == 0 || h2.valid == 0
+        || h0.instanceId != h1.instanceId || h1.instanceId != h2.instanceId)
+        return;
+
+    const float3 x0 = GetProjectedSourcePosition(r0);
+    const float3 x1 = GetProjectedSourcePosition(r1);
+    const float3 x2 = GetProjectedSourcePosition(r2);
+    const float incidentArea = 0.5 * max(
+        0, dot(-normalize(_IncidentDirection), cross(x1 - x0, x2 - x0)));
+    const float receiverArea = 0.5 * length(cross(
+        h1.position - h0.position, h2.position - h0.position));
+    if (incidentArea <= 0 || receiverArea <= 0)
+        return;
+
+    uint outputIndex;
+    InterlockedAdd(_OutputCounter[0], 1, outputIndex);
+    if (outputIndex >= _MaxOutputTriangles)
+        return;
+
+    const uint outputOffset = outputIndex * 3;
+    _ProjectedIndices[outputOffset] = r0;
+    _ProjectedIndices[outputOffset + 1] = r1;
+    _ProjectedIndices[outputOffset + 2] = r2;
+    ProjectedResult result = (ProjectedResult)0;
+    result.intensity = incidentArea / max(receiverArea, _MinReceiverArea);
+    result.receiverBoundary = GetBoundaryReason(h0, h1)
+        | GetBoundaryReason(h1, h2)
+        | GetBoundaryReason(h2, h0);
+    result.valid = 1;
+    _ProjectedResults[outputIndex] = result;
+}
+
+[numthreads(64, 1, 1)]
+void BuildProjectedTriangles(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    const uint triangleIndex = dispatchThreadId.x;
+    if (triangleIndex >= _TriangleCount)
+        return;
+
+    const uint offset = triangleIndex * 3;
+    const uint v0 = _SourceIndices[offset];
+    const uint v1 = _SourceIndices[offset + 1];
+    const uint v2 = _SourceIndices[offset + 2];
+    const uint e01 = _TriangleEdges[offset];
+    const uint e12 = _TriangleEdges[offset + 1];
+    const uint e20 = _TriangleEdges[offset + 2];
+    const uint m01 = _VertexCount + e01;
+    const uint m12 = _VertexCount + e12;
+    const uint m20 = _VertexCount + e20;
+    const uint mask = (_EdgeFlags[e01] != 0 ? 1 : 0)
+        | (_EdgeFlags[e12] != 0 ? 2 : 0)
+        | (_EdgeFlags[e20] != 0 ? 4 : 0);
+
+    if (mask == 0)
+        EmitProjectedTriangle(v0, v1, v2);
+    else if (mask == 1)
+    {
+        EmitProjectedTriangle(v0, m01, v2);
+        EmitProjectedTriangle(m01, v1, v2);
+    }
+    else if (mask == 2)
+    {
+        EmitProjectedTriangle(v1, m12, v0);
+        EmitProjectedTriangle(m12, v2, v0);
+    }
+    else if (mask == 4)
+    {
+        EmitProjectedTriangle(v2, m20, v1);
+        EmitProjectedTriangle(m20, v0, v1);
+    }
+    else if (mask == 3)
+    {
+        EmitProjectedTriangle(m01, v1, m12);
+        EmitProjectedTriangle(v0, m01, m12);
+        EmitProjectedTriangle(v0, m12, v2);
+    }
+    else if (mask == 6)
+    {
+        EmitProjectedTriangle(m12, v2, m20);
+        EmitProjectedTriangle(v1, m12, m20);
+        EmitProjectedTriangle(v1, m20, v0);
+    }
+    else if (mask == 5)
+    {
+        EmitProjectedTriangle(m20, v0, m01);
+        EmitProjectedTriangle(v2, m20, m01);
+        EmitProjectedTriangle(v2, m01, v1);
+    }
+    else
+    {
+        EmitProjectedTriangle(v0, m01, m20);
+        EmitProjectedTriangle(m01, v1, m12);
+        EmitProjectedTriangle(m20, m12, v2);
+        EmitProjectedTriangle(m01, m12, m20);
+    }
+}
+
+[numthreads(1, 1, 1)]
+void BuildOutputArgs(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    _OutputArgs[0] = min(_OutputCounter[0], _MaxOutputTriangles) * 3;
+    _OutputArgs[1] = 1;
+    _OutputArgs[2] = 0;
+    _OutputArgs[3] = 0;
 }

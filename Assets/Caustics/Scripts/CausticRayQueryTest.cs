@@ -12,6 +12,7 @@ namespace CausticMeshDxr
         const int ComputeThreadCount = 64;
         const int MaxCellCountPerAxis = 512;
         const uint ReceiverMask = 1;
+        static readonly uint[] ZeroSubdivisionCounter = { 0 };
 
         static readonly int AccelerationStructureId = Shader.PropertyToID("_AccelerationStructure");
         static readonly int SourceVerticesId = Shader.PropertyToID("_SourceVertices");
@@ -19,9 +20,6 @@ namespace CausticMeshDxr
         static readonly int SourceLineIndicesId = Shader.PropertyToID("_SourceLineIndices");
         static readonly int HitsId = Shader.PropertyToID("_Hits");
         static readonly int TriangleResultsId = Shader.PropertyToID("_TriangleResults");
-        static readonly int VertexTriangleOffsetsId = Shader.PropertyToID("_VertexTriangleOffsets");
-        static readonly int VertexTriangleIndicesId = Shader.PropertyToID("_VertexTriangleIndices");
-        static readonly int RenderNormalsId = Shader.PropertyToID("_RenderNormals");
         static readonly int ReceiverPrimitiveOffsetsId = Shader.PropertyToID("_ReceiverPrimitiveOffsets");
         static readonly int ReceiverPrimitiveNormalsId = Shader.PropertyToID("_ReceiverPrimitiveNormals");
         static readonly int SourceLocalToWorldId = Shader.PropertyToID("_SourceLocalToWorld");
@@ -39,6 +37,17 @@ namespace CausticMeshDxr
         static readonly int ReceiverBoundaryNormalCosId = Shader.PropertyToID("_ReceiverBoundaryNormalCos");
         static readonly int ShowReceiverBoundariesId = Shader.PropertyToID("_ShowReceiverBoundaries");
         static readonly int ReceiverBoundaryColorId = Shader.PropertyToID("_ReceiverBoundaryColor");
+        static readonly int SourceEdgesId = Shader.PropertyToID("_SourceEdges");
+        static readonly int TriangleEdgesId = Shader.PropertyToID("_TriangleEdges");
+        static readonly int EdgeFlagsId = Shader.PropertyToID("_EdgeFlags");
+        static readonly int EdgeHitsId = Shader.PropertyToID("_EdgeHits");
+        static readonly int ProjectedIndicesId = Shader.PropertyToID("_ProjectedIndices");
+        static readonly int ProjectedResultsId = Shader.PropertyToID("_ProjectedResults");
+        static readonly int OutputCounterId = Shader.PropertyToID("_OutputCounter");
+        static readonly int OutputArgsId = Shader.PropertyToID("_OutputArgs");
+        static readonly int EdgeCountId = Shader.PropertyToID("_EdgeCount");
+        static readonly int MaxOutputTrianglesId = Shader.PropertyToID("_MaxOutputTriangles");
+        static readonly int EnableSubdivisionId = Shader.PropertyToID("_EnableSubdivision");
 
         [Header("Scene")]
         [SerializeField] MeshRenderer[] receivers;
@@ -71,6 +80,9 @@ namespace CausticMeshDxr
         [SerializeField] bool showReceiverBoundaries;
         [SerializeField] Color receiverBoundaryColor = Color.magenta;
         [SerializeField, Range(0, 45)] float receiverBoundaryNormalAngle = 5;
+        [SerializeField] bool subdivideReceiverBoundaries = true;
+        [SerializeField, Min(4), InspectorName("Max Additional Triangles")]
+        int maxSubdividedTriangles = 262144;
         [SerializeField] bool showSourceGrid = true;
         [SerializeField] Color sourceGridColor = Color.cyan;
 
@@ -85,16 +97,21 @@ namespace CausticMeshDxr
         GraphicsBuffer sourceLineIndexBuffer;
         GraphicsBuffer hitBuffer;
         GraphicsBuffer triangleResultBuffer;
-        GraphicsBuffer vertexTriangleOffsetBuffer;
-        GraphicsBuffer vertexTriangleIndexBuffer;
-        GraphicsBuffer renderNormalBuffer;
         GraphicsBuffer receiverPrimitiveOffsetBuffer;
         GraphicsBuffer receiverPrimitiveNormalBuffer;
+        GraphicsBuffer sourceEdgeBuffer;
+        GraphicsBuffer triangleEdgeBuffer;
+        GraphicsBuffer edgeFlagBuffer;
+        GraphicsBuffer edgeHitBuffer;
+        GraphicsBuffer projectedIndexBuffer;
+        GraphicsBuffer projectedResultBuffer;
+        GraphicsBuffer outputCounterBuffer;
+        GraphicsBuffer outputArgsBuffer;
         SourceVertex[] sourceVertices;
         uint[] sourceIndices;
         uint[] sourceLineIndices;
-        uint[] vertexTriangleOffsets;
-        uint[] vertexTriangleIndices;
+        SourceEdge[] sourceEdges;
+        uint[] triangleEdges;
         int cellCountX;
         int cellCountZ;
         int vertexCount;
@@ -108,7 +125,11 @@ namespace CausticMeshDxr
         readonly List<ReceiverState> receiverStates = new();
         int traceKernel;
         int buildTrianglesKernel;
-        int buildRenderNormalsKernel;
+        int clearEdgeFlagsKernel;
+        int markBoundaryEdgesKernel;
+        int traceEdgeMidpointsKernel;
+        int buildProjectedTrianglesKernel;
+        int buildOutputArgsKernel;
         bool initialized;
         int readbackPendingCount;
         uint dispatchGeneration;
@@ -174,8 +195,8 @@ namespace CausticMeshDxr
             drawVertexCount = triangleCount * 3;
             sourceVertices = new SourceVertex[vertexCount];
             sourceIndices = CreateGridIndices();
+            CreateSharedEdges();
             sourceLineIndices = CreateGridLineIndices();
-            CreateVertexTriangleAdjacency();
             lineVertexCount = sourceLineIndices.Length;
         }
 
@@ -285,28 +306,6 @@ namespace CausticMeshDxr
             return indices;
         }
 
-        void CreateVertexTriangleAdjacency()
-        {
-            var triangleCounts = new uint[vertexCount];
-            for (var index = 0; index < sourceIndices.Length; index++)
-                triangleCounts[sourceIndices[index]]++;
-            vertexTriangleOffsets = new uint[vertexCount + 1];
-            vertexTriangleIndices = new uint[drawVertexCount];
-            for (var vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++)
-                vertexTriangleOffsets[vertexIndex + 1] = vertexTriangleOffsets[vertexIndex] + triangleCounts[vertexIndex];
-
-            var writeOffsets = (uint[])vertexTriangleOffsets.Clone();
-            for (var triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++)
-            {
-                var indexOffset = triangleIndex * 3;
-                for (var corner = 0; corner < 3; corner++)
-                {
-                    var vertexIndex = sourceIndices[indexOffset + corner];
-                    vertexTriangleIndices[writeOffsets[vertexIndex]++] = (uint)triangleIndex;
-                }
-            }
-        }
-
         void OnEnable()
         {
             RebuildGridData();
@@ -321,7 +320,10 @@ namespace CausticMeshDxr
             sourceSize.x = Mathf.Max(0.001f, sourceSize.x);
             sourceSize.y = Mathf.Max(0.001f, sourceSize.y);
             cellSize = Mathf.Max(0.001f, cellSize);
-            if (initialized && (GridTopologyChanged() || ReceiversChanged()))
+            if (initialized && (GridTopologyChanged()
+                || ReceiversChanged()
+                || projectedResultBuffer == null
+                || projectedResultBuffer.count != triangleCount + Mathf.Max(4, maxSubdividedTriangles)))
                 ReleaseResources();
             RebuildGridData();
             if (!Application.isPlaying || !initialized)
@@ -406,6 +408,77 @@ namespace CausticMeshDxr
                 accelerationStructure.Build();
                 UpdateReceiverPrimitiveNormals();
             }
+        }
+
+        void CreateSharedEdges()
+        {
+            var rowVertexCount = cellCountX + 1;
+            var horizontalEdgeCount = cellCountX * (cellCountZ + 1);
+            var verticalEdgeCount = rowVertexCount * cellCountZ;
+            var diagonalEdgeCount = cellCountX * cellCountZ;
+            var verticalOffset = horizontalEdgeCount;
+            var diagonalOffset = horizontalEdgeCount + verticalEdgeCount;
+            sourceEdges = new SourceEdge[horizontalEdgeCount + verticalEdgeCount + diagonalEdgeCount];
+            triangleEdges = new uint[drawVertexCount];
+
+            for (var z = 0; z <= cellCountZ; z++)
+            {
+                for (var x = 0; x < cellCountX; x++)
+                {
+                    var edgeIndex = z * cellCountX + x;
+                    var vertex = (uint)(z * rowVertexCount + x);
+                    sourceEdges[edgeIndex] = new SourceEdge { vertex0 = vertex, vertex1 = vertex + 1 };
+                }
+            }
+            for (var z = 0; z < cellCountZ; z++)
+            {
+                for (var x = 0; x <= cellCountX; x++)
+                {
+                    var edgeIndex = verticalOffset + z * rowVertexCount + x;
+                    var vertex = (uint)(z * rowVertexCount + x);
+                    sourceEdges[edgeIndex] = new SourceEdge
+                    {
+                        vertex0 = vertex,
+                        vertex1 = vertex + (uint)rowVertexCount,
+                    };
+                }
+            }
+            for (var z = 0; z < cellCountZ; z++)
+            {
+                for (var x = 0; x < cellCountX; x++)
+                {
+                    var cellIndex = z * cellCountX + x;
+                    var diagonalEdge = diagonalOffset + cellIndex;
+                    var v00 = (uint)(z * rowVertexCount + x);
+                    var v10 = v00 + 1;
+                    var v01 = v00 + (uint)rowVertexCount;
+                    sourceEdges[diagonalEdge] = new SourceEdge { vertex0 = v10, vertex1 = v01 };
+
+                    var triangleOffset = cellIndex * 6;
+                    triangleEdges[triangleOffset] = (uint)(verticalOffset + z * rowVertexCount + x);
+                    triangleEdges[triangleOffset + 1] = (uint)diagonalEdge;
+                    triangleEdges[triangleOffset + 2] = (uint)(z * cellCountX + x);
+                    triangleEdges[triangleOffset + 3] = (uint)diagonalEdge;
+                    triangleEdges[triangleOffset + 4] = (uint)((z + 1) * cellCountX + x);
+                    triangleEdges[triangleOffset + 5] = (uint)(verticalOffset + z * rowVertexCount + x + 1);
+                }
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct SourceEdge
+        {
+            public uint vertex0;
+            public uint vertex1;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct ProjectedResult
+        {
+            public float intensity;
+            public uint receiverBoundary;
+            public uint valid;
+            public uint padding;
         }
 
         void UpdateReceiverPrimitiveNormals()
@@ -556,33 +629,56 @@ namespace CausticMeshDxr
                 GraphicsBuffer.Target.Structured,
                 triangleCount,
                 Marshal.SizeOf<TriangleResult>());
-            vertexTriangleOffsetBuffer = new GraphicsBuffer(
+            sourceEdgeBuffer = new GraphicsBuffer(
                 GraphicsBuffer.Target.Structured,
-                vertexTriangleOffsets.Length,
+                sourceEdges.Length,
+                Marshal.SizeOf<SourceEdge>());
+            sourceEdgeBuffer.SetData(sourceEdges);
+            triangleEdgeBuffer = new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured,
+                triangleEdges.Length,
                 sizeof(uint));
-            vertexTriangleOffsetBuffer.SetData(vertexTriangleOffsets);
-            vertexTriangleIndexBuffer = new GraphicsBuffer(
+            triangleEdgeBuffer.SetData(triangleEdges);
+            edgeFlagBuffer = new GraphicsBuffer(
                 GraphicsBuffer.Target.Structured,
-                vertexTriangleIndices.Length,
+                sourceEdges.Length,
                 sizeof(uint));
-            vertexTriangleIndexBuffer.SetData(vertexTriangleIndices);
-            renderNormalBuffer = new GraphicsBuffer(
+            edgeHitBuffer = new GraphicsBuffer(
                 GraphicsBuffer.Target.Structured,
-                vertexCount,
-                Marshal.SizeOf<Vector3>());
+                sourceEdges.Length,
+                Marshal.SizeOf<RayHit>());
+            var maxOutputTriangles = triangleCount + Mathf.Max(4, maxSubdividedTriangles);
+            projectedIndexBuffer = new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured,
+                maxOutputTriangles * 3,
+                sizeof(uint));
+            projectedResultBuffer = new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured,
+                maxOutputTriangles,
+                Marshal.SizeOf<ProjectedResult>());
+            outputCounterBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, sizeof(uint));
+            outputArgsBuffer = new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured | GraphicsBuffer.Target.IndirectArguments,
+                4,
+                sizeof(uint));
 
             projectedTriangleMaterial = new Material(projectedTriangleShader)
             {
                 hideFlags = HideFlags.HideAndDontSave,
             };
-            projectedTriangleMaterial.SetBuffer(SourceIndicesId, sourceIndexBuffer);
             projectedTriangleMaterial.SetBuffer(HitsId, hitBuffer);
-            projectedTriangleMaterial.SetBuffer(TriangleResultsId, triangleResultBuffer);
-            projectedTriangleMaterial.SetBuffer(RenderNormalsId, renderNormalBuffer);
+            projectedTriangleMaterial.SetBuffer(EdgeHitsId, edgeHitBuffer);
+            projectedTriangleMaterial.SetBuffer(ProjectedIndicesId, projectedIndexBuffer);
+            projectedTriangleMaterial.SetBuffer(ProjectedResultsId, projectedResultBuffer);
+            projectedTriangleMaterial.SetInt(VertexCountId, vertexCount);
 
             traceKernel = rayQueryShader.FindKernel("TraceVertices");
             buildTrianglesKernel = rayQueryShader.FindKernel("BuildTriangles");
-            buildRenderNormalsKernel = rayQueryShader.FindKernel("BuildRenderNormals");
+            clearEdgeFlagsKernel = rayQueryShader.FindKernel("ClearEdgeFlags");
+            markBoundaryEdgesKernel = rayQueryShader.FindKernel("MarkBoundaryEdges");
+            traceEdgeMidpointsKernel = rayQueryShader.FindKernel("TraceEdgeMidpoints");
+            buildProjectedTrianglesKernel = rayQueryShader.FindKernel("BuildProjectedTriangles");
+            buildOutputArgsKernel = rayQueryShader.FindKernel("BuildOutputArgs");
             initialized = true;
             lastSourceTransform = transform.localToWorldMatrix;
             lastIncidentDirection = directionalLight.transform.forward.normalized;
@@ -590,7 +686,8 @@ namespace CausticMeshDxr
             Debug.Log(
                 $"Caustic grid initialized with {vertexCount} shared vertices and {triangleCount} triangles "
                 + $"({cellCountX}x{cellCountZ} square cells, actual size {actualSourceSize.x:F3}x{actualSourceSize.y:F3}) "
-                + $"with {receiverStates.Count} receivers on {SystemInfo.graphicsDeviceName}.",
+                + $"with {sourceEdges.Length} shared edges, {projectedResultBuffer.count} projected triangle slots, "
+                + $"and {receiverStates.Count} receivers on {SystemInfo.graphicsDeviceName}.",
                 this);
             return true;
         }
@@ -610,12 +707,30 @@ namespace CausticMeshDxr
             rayQueryShader.SetBuffer(buildTrianglesKernel, SourceIndicesId, sourceIndexBuffer);
             rayQueryShader.SetBuffer(buildTrianglesKernel, HitsId, hitBuffer);
             rayQueryShader.SetBuffer(buildTrianglesKernel, TriangleResultsId, triangleResultBuffer);
-            rayQueryShader.SetBuffer(buildRenderNormalsKernel, SourceVerticesId, sourceVertexBuffer);
-            rayQueryShader.SetBuffer(buildRenderNormalsKernel, HitsId, hitBuffer);
-            rayQueryShader.SetBuffer(buildRenderNormalsKernel, TriangleResultsId, triangleResultBuffer);
-            rayQueryShader.SetBuffer(buildRenderNormalsKernel, VertexTriangleOffsetsId, vertexTriangleOffsetBuffer);
-            rayQueryShader.SetBuffer(buildRenderNormalsKernel, VertexTriangleIndicesId, vertexTriangleIndexBuffer);
-            rayQueryShader.SetBuffer(buildRenderNormalsKernel, RenderNormalsId, renderNormalBuffer);
+            rayQueryShader.SetBuffer(clearEdgeFlagsKernel, EdgeFlagsId, edgeFlagBuffer);
+            rayQueryShader.SetBuffer(markBoundaryEdgesKernel, SourceIndicesId, sourceIndexBuffer);
+            rayQueryShader.SetBuffer(markBoundaryEdgesKernel, TriangleEdgesId, triangleEdgeBuffer);
+            rayQueryShader.SetBuffer(markBoundaryEdgesKernel, HitsId, hitBuffer);
+            rayQueryShader.SetBuffer(markBoundaryEdgesKernel, EdgeFlagsId, edgeFlagBuffer);
+            rayQueryShader.SetRayTracingAccelerationStructure(traceEdgeMidpointsKernel, AccelerationStructureId, accelerationStructure);
+            rayQueryShader.SetBuffer(traceEdgeMidpointsKernel, SourceVerticesId, sourceVertexBuffer);
+            rayQueryShader.SetBuffer(traceEdgeMidpointsKernel, SourceEdgesId, sourceEdgeBuffer);
+            rayQueryShader.SetBuffer(traceEdgeMidpointsKernel, EdgeFlagsId, edgeFlagBuffer);
+            rayQueryShader.SetBuffer(traceEdgeMidpointsKernel, EdgeHitsId, edgeHitBuffer);
+            rayQueryShader.SetBuffer(traceEdgeMidpointsKernel, ReceiverPrimitiveOffsetsId, receiverPrimitiveOffsetBuffer);
+            rayQueryShader.SetBuffer(traceEdgeMidpointsKernel, ReceiverPrimitiveNormalsId, receiverPrimitiveNormalBuffer);
+            rayQueryShader.SetBuffer(buildProjectedTrianglesKernel, SourceVerticesId, sourceVertexBuffer);
+            rayQueryShader.SetBuffer(buildProjectedTrianglesKernel, SourceIndicesId, sourceIndexBuffer);
+            rayQueryShader.SetBuffer(buildProjectedTrianglesKernel, SourceEdgesId, sourceEdgeBuffer);
+            rayQueryShader.SetBuffer(buildProjectedTrianglesKernel, TriangleEdgesId, triangleEdgeBuffer);
+            rayQueryShader.SetBuffer(buildProjectedTrianglesKernel, EdgeFlagsId, edgeFlagBuffer);
+            rayQueryShader.SetBuffer(buildProjectedTrianglesKernel, HitsId, hitBuffer);
+            rayQueryShader.SetBuffer(buildProjectedTrianglesKernel, EdgeHitsId, edgeHitBuffer);
+            rayQueryShader.SetBuffer(buildProjectedTrianglesKernel, ProjectedIndicesId, projectedIndexBuffer);
+            rayQueryShader.SetBuffer(buildProjectedTrianglesKernel, ProjectedResultsId, projectedResultBuffer);
+            rayQueryShader.SetBuffer(buildProjectedTrianglesKernel, OutputCounterId, outputCounterBuffer);
+            rayQueryShader.SetBuffer(buildOutputArgsKernel, OutputCounterId, outputCounterBuffer);
+            rayQueryShader.SetBuffer(buildOutputArgsKernel, OutputArgsId, outputArgsBuffer);
             rayQueryShader.SetMatrix(SourceLocalToWorldId, transform.localToWorldMatrix);
             rayQueryShader.SetMatrix(SourceNormalToWorldId, transform.worldToLocalMatrix.transpose);
             rayQueryShader.SetInt(VertexCountId, vertexCount);
@@ -626,9 +741,17 @@ namespace CausticMeshDxr
             rayQueryShader.SetFloat(RayTMaxId, rayTMax);
             rayQueryShader.SetFloat(MinReceiverAreaId, minReceiverArea);
             rayQueryShader.SetFloat(ReceiverBoundaryNormalCosId, Mathf.Cos(receiverBoundaryNormalAngle * Mathf.Deg2Rad));
+            rayQueryShader.SetInt(EdgeCountId, sourceEdges.Length);
+            rayQueryShader.SetInt(MaxOutputTrianglesId, projectedResultBuffer.count);
+            rayQueryShader.SetInt(EnableSubdivisionId, subdivideReceiverBoundaries ? 1 : 0);
+            outputCounterBuffer.SetData(ZeroSubdivisionCounter);
             rayQueryShader.Dispatch(traceKernel, DivideRoundUp(vertexCount, ComputeThreadCount), 1, 1);
             rayQueryShader.Dispatch(buildTrianglesKernel, DivideRoundUp(triangleCount, ComputeThreadCount), 1, 1);
-            rayQueryShader.Dispatch(buildRenderNormalsKernel, DivideRoundUp(vertexCount, ComputeThreadCount), 1, 1);
+            rayQueryShader.Dispatch(clearEdgeFlagsKernel, DivideRoundUp(sourceEdges.Length, ComputeThreadCount), 1, 1);
+            rayQueryShader.Dispatch(markBoundaryEdgesKernel, DivideRoundUp(triangleCount, ComputeThreadCount), 1, 1);
+            rayQueryShader.Dispatch(traceEdgeMidpointsKernel, DivideRoundUp(sourceEdges.Length, ComputeThreadCount), 1, 1);
+            rayQueryShader.Dispatch(buildProjectedTrianglesKernel, DivideRoundUp(triangleCount, ComputeThreadCount), 1, 1);
+            rayQueryShader.Dispatch(buildOutputArgsKernel, 1, 1, 1);
 
             projectedTriangleMaterial.SetColor(ColorId, causticColor);
             projectedTriangleMaterial.SetFloat(IntensityScaleId, intensityScale);
@@ -641,7 +764,7 @@ namespace CausticMeshDxr
                 return;
             }
 
-            readbackPendingCount = 2;
+            readbackPendingCount = 4;
             AsyncGPUReadback.Request(hitBuffer, request =>
             {
                 CompleteReadback(currentResourceGeneration);
@@ -682,6 +805,68 @@ namespace CausticMeshDxr
                 data.CopyTo(validationTriangleResults);
                 validationTrianglesGeneration = currentGeneration;
                 TryValidateTriangles(currentGeneration, incidentDirection);
+            });
+            AsyncGPUReadback.Request(edgeFlagBuffer, request =>
+            {
+                CompleteReadback(currentResourceGeneration);
+                if (this == null || !isActiveAndEnabled
+                    || currentResourceGeneration != resourceGeneration
+                    || currentGeneration != dispatchGeneration)
+                    return;
+                if (request.hasError)
+                {
+                    Debug.LogError("Failed to read receiver boundary edge flags from the GPU.", this);
+                    return;
+                }
+
+                var flags = request.GetData<uint>();
+                var boundaryEdgeCount = 0;
+                var sharpNormalEdgeCount = 0;
+                var crossReceiverEdgeCount = 0;
+                for (var edgeIndex = 0; edgeIndex < flags.Length; edgeIndex++)
+                {
+                    var flag = flags[edgeIndex];
+                    if (flag == 0)
+                        continue;
+                    boundaryEdgeCount++;
+                    if ((flag & 1) != 0)
+                        sharpNormalEdgeCount++;
+                    if ((flag & 2) != 0)
+                        crossReceiverEdgeCount++;
+                }
+                Debug.Log(
+                    $"Caustic conforming subdivision marked {boundaryEdgeCount}/{sourceEdges.Length} shared edges "
+                    + $"({sharpNormalEdgeCount} sharp-normal, {crossReceiverEdgeCount} cross-receiver).",
+                    this);
+            });
+            AsyncGPUReadback.Request(outputCounterBuffer, request =>
+            {
+                CompleteReadback(currentResourceGeneration);
+                if (this == null || !isActiveAndEnabled
+                    || currentResourceGeneration != resourceGeneration
+                    || currentGeneration != dispatchGeneration)
+                    return;
+                if (request.hasError)
+                {
+                    Debug.LogError("Failed to read projected triangle output count from the GPU.", this);
+                    return;
+                }
+
+                var outputCount = request.GetData<uint>()[0];
+                if (outputCount > (uint)projectedResultBuffer.count)
+                {
+                    Debug.LogError(
+                        $"Caustic projected triangle buffer overflow: {outputCount} requested for "
+                        + $"{projectedResultBuffer.count} slots. Increase Max Additional Triangles.",
+                        this);
+                }
+                else
+                {
+                    Debug.Log(
+                        $"Caustic conforming subdivision emitted {outputCount} triangles "
+                        + $"into {projectedResultBuffer.count} slots.",
+                        this);
+                }
             });
         }
 
@@ -909,12 +1094,12 @@ namespace CausticMeshDxr
             if (!initialized || projectedTriangleMaterial == null)
                 return;
 
-            Graphics.DrawProcedural(
+            Graphics.DrawProceduralIndirect(
                 projectedTriangleMaterial,
                 GetReceiverBounds(),
                 MeshTopology.Triangles,
-                drawVertexCount,
-                1,
+                outputArgsBuffer,
+                0,
                 null,
                 null,
                 ShadowCastingMode.Off,
@@ -1059,16 +1244,26 @@ namespace CausticMeshDxr
             hitBuffer = null;
             triangleResultBuffer?.Dispose();
             triangleResultBuffer = null;
-            vertexTriangleOffsetBuffer?.Dispose();
-            vertexTriangleOffsetBuffer = null;
-            vertexTriangleIndexBuffer?.Dispose();
-            vertexTriangleIndexBuffer = null;
-            renderNormalBuffer?.Dispose();
-            renderNormalBuffer = null;
             receiverPrimitiveOffsetBuffer?.Dispose();
             receiverPrimitiveOffsetBuffer = null;
             receiverPrimitiveNormalBuffer?.Dispose();
             receiverPrimitiveNormalBuffer = null;
+            sourceEdgeBuffer?.Dispose();
+            sourceEdgeBuffer = null;
+            triangleEdgeBuffer?.Dispose();
+            triangleEdgeBuffer = null;
+            edgeFlagBuffer?.Dispose();
+            edgeFlagBuffer = null;
+            edgeHitBuffer?.Dispose();
+            edgeHitBuffer = null;
+            projectedIndexBuffer?.Dispose();
+            projectedIndexBuffer = null;
+            projectedResultBuffer?.Dispose();
+            projectedResultBuffer = null;
+            outputCounterBuffer?.Dispose();
+            outputCounterBuffer = null;
+            outputArgsBuffer?.Dispose();
+            outputArgsBuffer = null;
             accelerationStructure?.Dispose();
             accelerationStructure = null;
             if (projectedTriangleMaterial != null)

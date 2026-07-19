@@ -33,20 +33,19 @@ Shader "Hidden/Caustics/Projected Triangle"
                 float normalPadding;
             };
 
-            struct TriangleResult
+            struct ProjectedResult
             {
                 float intensity;
-                float incidentArea;
-                float receiverArea;
-                uint valid;
-                float3 renderNormal;
                 uint receiverBoundary;
+                uint valid;
+                uint padding;
             };
 
-            StructuredBuffer<uint> _SourceIndices;
             StructuredBuffer<RayHit> _Hits;
-            StructuredBuffer<TriangleResult> _TriangleResults;
-            StructuredBuffer<float3> _RenderNormals;
+            StructuredBuffer<RayHit> _EdgeHits;
+            StructuredBuffer<uint> _ProjectedIndices;
+            StructuredBuffer<ProjectedResult> _ProjectedResults;
+            uint _VertexCount;
             float4 _Color;
             float _IntensityScale;
             float _SurfaceOffset;
@@ -63,16 +62,20 @@ Shader "Hidden/Caustics/Projected Triangle"
 
             Varyings Vert(uint vertexId : SV_VertexID)
             {
-                const uint triangleIndex = vertexId / 3;
-                const uint sourceVertexIndex = _SourceIndices[vertexId];
-                const TriangleResult triangleResult = _TriangleResults[triangleIndex];
-                const float3 positionWS = _Hits[sourceVertexIndex].position
-                    + _RenderNormals[sourceVertexIndex] * _SurfaceOffset;
                 Varyings output;
+                const uint triangleIndex = vertexId / 3;
+                const uint vertexReference = _ProjectedIndices[vertexId];
+                RayHit hit = (RayHit)0;
+                if (vertexReference < _VertexCount)
+                    hit = _Hits[vertexReference];
+                else
+                    hit = _EdgeHits[vertexReference - _VertexCount];
+                const ProjectedResult projectedResult = _ProjectedResults[triangleIndex];
+                const float3 positionWS = hit.position + hit.receiverNormal * _SurfaceOffset;
                 output.positionCS = mul(UNITY_MATRIX_VP, float4(positionWS, 1));
-                output.intensity = triangleResult.intensity * _IntensityScale;
-                output.valid = triangleResult.valid;
-                output.receiverBoundary = triangleResult.receiverBoundary;
+                output.intensity = projectedResult.intensity * _IntensityScale;
+                output.valid = projectedResult.valid;
+                output.receiverBoundary = projectedResult.receiverBoundary;
                 return output;
             }
 
