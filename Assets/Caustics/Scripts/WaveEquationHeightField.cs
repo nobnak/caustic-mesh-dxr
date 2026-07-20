@@ -29,6 +29,11 @@ namespace CausticMeshDxr
         [SerializeField, Min(0.001f)] float sourceRadius = 0.15f;
         [SerializeField, Range(0, 0.25f)] float sourceAmplitude = 0.03f;
         [SerializeField, Min(0)] float sourceFrequency = 1;
+        [Header("Source Motion")]
+        [SerializeField] bool moveSourceWithNoise;
+        [SerializeField, Min(0)] float sourceMovementRange = 1;
+        [SerializeField, Min(0)] float sourceMovementSpeed = 0.2f;
+        [SerializeField] int sourceNoiseSeed;
 
         RenderTexture previousHeight;
         RenderTexture currentHeight;
@@ -57,7 +62,11 @@ namespace CausticMeshDxr
                     hash = hash * 397 ^ sourceCenter.GetHashCode();
                     hash = hash * 397 ^ sourceRadius.GetHashCode();
                     hash = hash * 397 ^ sourceAmplitude.GetHashCode();
-                    return hash * 397 ^ sourceFrequency.GetHashCode();
+                    hash = hash * 397 ^ sourceFrequency.GetHashCode();
+                    hash = hash * 397 ^ moveSourceWithNoise.GetHashCode();
+                    hash = hash * 397 ^ sourceMovementRange.GetHashCode();
+                    hash = hash * 397 ^ sourceMovementSpeed.GetHashCode();
+                    return hash * 397 ^ sourceNoiseSeed;
                 }
             }
         }
@@ -158,9 +167,10 @@ namespace CausticMeshDxr
                 new Vector4(sourceSize.x, sourceSize.y, 0, 0));
             shader.SetFloat(WaveStepCoefficientId, coefficient);
             shader.SetFloat(WaveDampingId, Mathf.Clamp01(damping * stepDuration));
+            var animatedSourceCenter = GetSourceCenter(stepTime, sourceSize);
             shader.SetVector(
                 WaveSourceCenterId,
-                new Vector4(sourceCenter.x, sourceCenter.y, 0, 0));
+                new Vector4(animatedSourceCenter.x, animatedSourceCenter.y, 0, 0));
             shader.SetFloat(WaveSourceRadiusId, sourceRadius);
             shader.SetFloat(
                 WaveSourceHeightId,
@@ -175,6 +185,26 @@ namespace CausticMeshDxr
             previousHeight = currentHeight;
             currentHeight = nextHeight;
             nextHeight = releasedHeight;
+        }
+
+        Vector2 GetSourceCenter(float time, Vector2 sourceSize)
+        {
+            var result = sourceCenter;
+            if (moveSourceWithNoise)
+            {
+                var noiseTime = time * sourceMovementSpeed;
+                var seed = sourceNoiseSeed * 0.12347f;
+                var noiseX = Mathf.PerlinNoise(seed + 11.17f, noiseTime + 37.31f) * 2 - 1;
+                var noiseZ = Mathf.PerlinNoise(seed + 71.43f, noiseTime + 19.73f) * 2 - 1;
+                result += new Vector2(noiseX, noiseZ) * sourceMovementRange;
+            }
+
+            var sourceLimit = new Vector2(
+                Mathf.Max(0, sourceSize.x * 0.5f - sourceRadius),
+                Mathf.Max(0, sourceSize.y * 0.5f - sourceRadius));
+            result.x = Mathf.Clamp(result.x, -sourceLimit.x, sourceLimit.x);
+            result.y = Mathf.Clamp(result.y, -sourceLimit.y, sourceLimit.y);
+            return result;
         }
 
         void ClearHeightTexture(ComputeShader shader, RenderTexture texture, int width, int height)
