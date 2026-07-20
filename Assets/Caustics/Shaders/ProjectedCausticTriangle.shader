@@ -1,5 +1,11 @@
 Shader "Hidden/Caustics/Projected Triangle"
 {
+    Properties
+    {
+        [HideInInspector] _SrcBlend ("Source Blend", Float) = 1
+        [HideInInspector] _DstBlend ("Destination Blend", Float) = 1
+    }
+
     SubShader
     {
         Tags
@@ -10,7 +16,7 @@ Shader "Hidden/Caustics/Projected Triangle"
 
         Pass
         {
-            Blend One One
+            Blend [_SrcBlend] [_DstBlend]
             Cull Off
             ZWrite Off
             ZTest LEqual

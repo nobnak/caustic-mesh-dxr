@@ -37,6 +37,8 @@ namespace CausticMeshDxr
         static readonly int ReceiverBoundaryNormalCosId = Shader.PropertyToID("_ReceiverBoundaryNormalCos");
         static readonly int ShowReceiverBoundariesId = Shader.PropertyToID("_ShowReceiverBoundaries");
         static readonly int ReceiverBoundaryColorId = Shader.PropertyToID("_ReceiverBoundaryColor");
+        static readonly int SourceBlendId = Shader.PropertyToID("_SrcBlend");
+        static readonly int DestinationBlendId = Shader.PropertyToID("_DstBlend");
         static readonly int SourceEdgesId = Shader.PropertyToID("_SourceEdges");
         static readonly int TriangleEdgesId = Shader.PropertyToID("_TriangleEdges");
         static readonly int EdgeFlagsId = Shader.PropertyToID("_EdgeFlags");
@@ -74,6 +76,7 @@ namespace CausticMeshDxr
         [SerializeField, Min(0.00000001f)] float minReceiverArea = 0.00001f;
 
         [Header("Display")]
+        [SerializeField] CausticBlendMode causticBlendMode = CausticBlendMode.ModulatedAdditive;
         [SerializeField] Color causticColor = new(1, 0.7f, 0.1f, 1);
         [SerializeField, Min(0)] float intensityScale = 0.25f;
         [SerializeField, Min(0)] float surfaceOffset = 0.002f;
@@ -151,6 +154,12 @@ namespace CausticMeshDxr
             public uint instanceId;
             public int primitiveOffset;
             public Vector3[] localPrimitiveNormals;
+        }
+
+        enum CausticBlendMode
+        {
+            Additive,
+            ModulatedAdditive,
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -758,6 +767,12 @@ namespace CausticMeshDxr
             projectedTriangleMaterial.SetFloat(SurfaceOffsetId, surfaceOffset);
             projectedTriangleMaterial.SetInt(ShowReceiverBoundariesId, showReceiverBoundaries ? 1 : 0);
             projectedTriangleMaterial.SetColor(ReceiverBoundaryColorId, receiverBoundaryColor);
+            projectedTriangleMaterial.SetInt(
+                SourceBlendId,
+                causticBlendMode == CausticBlendMode.ModulatedAdditive
+                    ? (int)BlendMode.DstColor
+                    : (int)BlendMode.One);
+            projectedTriangleMaterial.SetInt(DestinationBlendId, (int)BlendMode.One);
             if (readbackPendingCount != 0)
             {
                 validationRefreshRequested = true;
