@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Serialization;
 
 namespace CausticMeshDxr
 {
@@ -13,6 +14,7 @@ namespace CausticMeshDxr
         const int MaxCellCountPerAxis = 512;
         const uint ReceiverMask = 1;
         static readonly uint[] ZeroSubdivisionCounter = { 0 };
+        static readonly HashSet<CausticRayQueryTest> ActiveInstances = new();
 
         static readonly int AccelerationStructureId = Shader.PropertyToID("_AccelerationStructure");
         static readonly int SourceVerticesId = Shader.PropertyToID("_SourceVertices");
@@ -50,6 +52,15 @@ namespace CausticMeshDxr
         static readonly int EdgeCountId = Shader.PropertyToID("_EdgeCount");
         static readonly int MaxOutputTrianglesId = Shader.PropertyToID("_MaxOutputTriangles");
         static readonly int EnableSubdivisionId = Shader.PropertyToID("_EnableSubdivision");
+        static readonly int SourceDisplayModeId = Shader.PropertyToID("_SourceDisplayMode");
+        static readonly int SourceSurfaceColorId = Shader.PropertyToID("_SourceSurfaceColor");
+        static readonly int SourceSmoothnessId = Shader.PropertyToID("_SourceSmoothness");
+        static readonly int SourceRefractionStrengthId = Shader.PropertyToID("_SourceRefractionStrength");
+        static readonly int SourceMainLightIntensityId = Shader.PropertyToID("_SourceMainLightIntensity");
+        static readonly int SourceAmbientIntensityId = Shader.PropertyToID("_SourceAmbientIntensity");
+        static readonly int SourceSpecularIntensityId = Shader.PropertyToID("_SourceSpecularIntensity");
+        static readonly int SourceFresnelIntensityId = Shader.PropertyToID("_SourceFresnelIntensity");
+        static readonly int SourceRefractionLitBlendId = Shader.PropertyToID("_SourceRefractionLitBlend");
         static readonly int HeightMapId = Shader.PropertyToID("_HeightMap");
         static readonly int HeightMapSizeId = Shader.PropertyToID("_HeightMapSize");
         static readonly int GridCellSizeId = Shader.PropertyToID("_GridCellSize");
@@ -84,8 +95,15 @@ namespace CausticMeshDxr
         [SerializeField] bool subdivideReceiverBoundaries = true;
         [SerializeField, Min(4), InspectorName("Max Additional Triangles")]
         int maxSubdividedTriangles = 262144;
-        [SerializeField] bool showSourceGrid = true;
+        [SerializeField, FormerlySerializedAs("showSourceGrid")]
+        SourceDisplayMode sourceDisplayMode = SourceDisplayMode.Outline;
         [SerializeField] Color sourceGridColor = Color.cyan;
+        [SerializeField] Color sourceSurfaceColor = new(0.05f, 0.2f, 0.3f, 0.4f);
+        [SerializeField, Range(0, 1)] float sourceSmoothness = 0.85f;
+        [SerializeField, FormerlySerializedAs("litLighting")]
+        SourceLightingSettings sourceLighting = new(1, 1, 1, 0.05f);
+        [SerializeField, Min(0)] float sourceRefractionStrength = 8;
+        [SerializeField, Range(0, 1)] float sourceRefractionLitBlend;
 
         [Header("Validation")]
         [SerializeField] bool enableValidation;
@@ -123,7 +141,6 @@ namespace CausticMeshDxr
         Vector2 actualSourceSize;
         Material projectedTriangleMaterial;
         Material sourceGridOutlineMaterial;
-        CommandBuffer sourceGridOutlineCommandBuffer;
         readonly List<ReceiverState> receiverStates = new();
         int traceKernel;
         int buildSourceVerticesFromHeightMapKernel;
@@ -319,12 +336,12 @@ namespace CausticMeshDxr
 
         void OnEnable()
         {
+            ActiveInstances.Add(this);
             RebuildGridData();
             UpdateSourceVertices();
             lastHeightField = heightField;
             lastHeightFieldStateHash = heightField != null ? heightField.StateHash : 0;
             EnsureSourceGridOutlineResources();
-            RenderPipelineManager.endCameraRendering += DrawSourceGridInSceneView;
             hasDispatched = false;
         }
 
@@ -342,8 +359,7 @@ namespace CausticMeshDxr
             RebuildGridData();
             if (!Application.isPlaying || !initialized)
                 UpdateSourceVertices();
-            if (!Application.isPlaying)
-                EnsureSourceGridOutlineResources();
+            EnsureSourceGridOutlineResources();
             hasDispatched = false;
         }
 
@@ -378,8 +394,6 @@ namespace CausticMeshDxr
                 && hasDispatched
                 && !changed)
             {
-                QueueProjectedGrid();
-                QueueSourceGridOutline();
                 return;
             }
 
@@ -391,8 +405,6 @@ namespace CausticMeshDxr
             lastHeightField = heightField;
             lastHeightFieldStateHash = heightField != null ? heightField.StateHash : 0;
             hasDispatched = true;
-            QueueProjectedGrid();
-            QueueSourceGridOutline();
         }
 
         bool ReceiverTransformsChanged()
@@ -658,7 +670,10 @@ namespace CausticMeshDxr
                 vertexCount,
                 Marshal.SizeOf<SourceVertex>());
             sourceVertexBuffer.SetData(sourceVertices);
-            sourceIndexBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, drawVertexCount, sizeof(uint));
+            sourceIndexBuffer ??= new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured,
+                drawVertexCount,
+                sizeof(uint));
             sourceIndexBuffer.SetData(sourceIndices);
             EnsureSourceGridOutlineResources();
             hitBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertexCount, Marshal.SizeOf<RayHit>());
@@ -924,6 +939,31 @@ namespace CausticMeshDxr
             });
         }
 
+        enum SourceDisplayMode
+        {
+            Off,
+            Outline,
+            Lit,
+            Refraction,
+        }
+
+        [System.Serializable]
+        struct SourceLightingSettings
+        {
+            [Min(0)] public float mainLight;
+            [Min(0)] public float ambient;
+            [Min(0)] public float specular;
+            [Min(0)] public float fresnel;
+
+            public SourceLightingSettings(float mainLight, float ambient, float specular, float fresnel)
+            {
+                this.mainLight = mainLight;
+                this.ambient = ambient;
+                this.specular = specular;
+                this.fresnel = fresnel;
+            }
+        }
+
         bool TryDispatchSourceVerticesGpu()
         {
             if (enableValidation || heightField == null)
@@ -1176,67 +1216,51 @@ namespace CausticMeshDxr
             return transform.worldToLocalMatrix.transpose.MultiplyVector(sourceVertices[index].normal).normalized;
         }
 
-        void QueueProjectedGrid()
+        internal static void DrawProjectedCaustics(CommandBuffer commandBuffer, Camera camera)
         {
-            if (!initialized || projectedTriangleMaterial == null)
-                return;
-
-            Graphics.DrawProceduralIndirect(
-                projectedTriangleMaterial,
-                GetReceiverBounds(),
-                MeshTopology.Triangles,
-                outputArgsBuffer,
-                0,
-                null,
-                null,
-                ShadowCastingMode.Off,
-                false,
-                gameObject.layer);
+            foreach (var instance in ActiveInstances)
+            {
+                if (instance == null
+                    || !instance.isActiveAndEnabled
+                    || !instance.initialized
+                    || instance.projectedTriangleMaterial == null
+                    || instance.outputArgsBuffer == null
+                    || (camera.cullingMask & (1 << instance.gameObject.layer)) == 0)
+                    continue;
+                commandBuffer.DrawProceduralIndirect(
+                    Matrix4x4.identity,
+                    instance.projectedTriangleMaterial,
+                    0,
+                    MeshTopology.Triangles,
+                    instance.outputArgsBuffer,
+                    0);
+            }
         }
 
-        Bounds GetReceiverBounds()
+        internal static void DrawSourceSurfaces(CommandBuffer commandBuffer, Camera camera)
         {
-            if (receiverStates.Count == 0)
-                return new Bounds(transform.position, Vector3.one);
-
-            var bounds = receiverStates[0].renderer.bounds;
-            for (var i = 1; i < receiverStates.Count; i++)
-                bounds.Encapsulate(receiverStates[i].renderer.bounds);
-            return bounds;
-        }
-
-        void QueueSourceGridOutline()
-        {
-            if (!showSourceGrid || !initialized || sourceGridOutlineMaterial == null)
-                return;
-
-            sourceGridOutlineMaterial.SetMatrix(SourceLocalToWorldId, transform.localToWorldMatrix);
-            sourceGridOutlineMaterial.SetColor(ColorId, sourceGridColor);
-            var maxScale = Mathf.Max(
-                Mathf.Abs(transform.lossyScale.x),
-                Mathf.Abs(transform.lossyScale.y),
-                Mathf.Abs(transform.lossyScale.z));
-            var diameter = Mathf.Sqrt(
-                actualSourceSize.x * actualSourceSize.x
-                + actualSourceSize.y * actualSourceSize.y
-                + 4 * Mathf.Pow(heightField != null ? heightField.MaximumAbsoluteHeight : 0, 2)) * maxScale;
-            var bounds = new Bounds(transform.TransformPoint(Vector3.zero), Vector3.one * Mathf.Max(0.01f, diameter));
-            Graphics.DrawProcedural(
-                sourceGridOutlineMaterial,
-                bounds,
-                MeshTopology.Lines,
-                lineVertexCount,
-                1,
-                null,
-                null,
-                ShadowCastingMode.Off,
-                false,
-                gameObject.layer);
+            foreach (var instance in ActiveInstances)
+            {
+                if (instance == null
+                    || !instance.isActiveAndEnabled
+                    || instance.sourceDisplayMode == SourceDisplayMode.Off
+                    || instance.sourceGridOutlineMaterial == null
+                    || (camera.cullingMask & (1 << instance.gameObject.layer)) == 0)
+                    continue;
+                instance.ConfigureSourceDisplayMaterial();
+                instance.GetSourceDisplayDrawParameters(out var topology, out var indexCount);
+                commandBuffer.DrawProcedural(
+                    Matrix4x4.identity,
+                    instance.sourceGridOutlineMaterial,
+                    0,
+                    topology,
+                    indexCount);
+            }
         }
 
         void EnsureSourceGridOutlineResources()
         {
-            if (!showSourceGrid || sourceGridOutlineShader == null || sourceVertices == null)
+            if (sourceDisplayMode == SourceDisplayMode.Off || sourceGridOutlineShader == null || sourceVertices == null)
                 return;
 
             if (sourceVertexBuffer == null || sourceVertexBuffer.count != vertexCount)
@@ -1246,8 +1270,18 @@ namespace CausticMeshDxr
                     GraphicsBuffer.Target.Structured,
                     vertexCount,
                     Marshal.SizeOf<SourceVertex>());
+                sourceVertexBuffer.SetData(sourceVertices);
             }
-            sourceVertexBuffer.SetData(sourceVertices);
+
+            if (sourceIndexBuffer == null || sourceIndexBuffer.count != drawVertexCount)
+            {
+                sourceIndexBuffer?.Dispose();
+                sourceIndexBuffer = new GraphicsBuffer(
+                    GraphicsBuffer.Target.Structured,
+                    drawVertexCount,
+                    sizeof(uint));
+                sourceIndexBuffer.SetData(sourceIndices);
+            }
 
             if (sourceLineIndexBuffer == null || sourceLineIndexBuffer.count != lineVertexCount)
             {
@@ -1266,32 +1300,31 @@ namespace CausticMeshDxr
                 };
             }
             sourceGridOutlineMaterial.SetBuffer(SourceVerticesId, sourceVertexBuffer);
+            sourceGridOutlineMaterial.SetBuffer(SourceIndicesId, sourceIndexBuffer);
             sourceGridOutlineMaterial.SetBuffer(SourceLineIndicesId, sourceLineIndexBuffer);
         }
 
-        void DrawSourceGridInSceneView(ScriptableRenderContext context, Camera camera)
+        void ConfigureSourceDisplayMaterial()
         {
-            if (!showSourceGrid || camera == null || camera.cameraType != CameraType.SceneView)
-                return;
-
-            EnsureSourceGridOutlineResources();
-            if (sourceGridOutlineMaterial == null)
-                return;
-
             sourceGridOutlineMaterial.SetMatrix(SourceLocalToWorldId, transform.localToWorldMatrix);
+            sourceGridOutlineMaterial.SetMatrix(SourceNormalToWorldId, transform.worldToLocalMatrix.transpose);
+            sourceGridOutlineMaterial.SetInt(SourceDisplayModeId, (int)sourceDisplayMode);
             sourceGridOutlineMaterial.SetColor(ColorId, sourceGridColor);
-            sourceGridOutlineCommandBuffer ??= new CommandBuffer
-            {
-                name = "Caustic Source Grid Outline",
-            };
-            sourceGridOutlineCommandBuffer.Clear();
-            sourceGridOutlineCommandBuffer.DrawProcedural(
-                Matrix4x4.identity,
-                sourceGridOutlineMaterial,
-                0,
-                MeshTopology.Lines,
-                lineVertexCount);
-            context.ExecuteCommandBuffer(sourceGridOutlineCommandBuffer);
+            sourceGridOutlineMaterial.SetColor(SourceSurfaceColorId, sourceSurfaceColor);
+            sourceGridOutlineMaterial.SetFloat(SourceSmoothnessId, sourceSmoothness);
+            sourceGridOutlineMaterial.SetFloat(SourceRefractionStrengthId, sourceRefractionStrength);
+            sourceGridOutlineMaterial.SetFloat(SourceMainLightIntensityId, sourceLighting.mainLight);
+            sourceGridOutlineMaterial.SetFloat(SourceAmbientIntensityId, sourceLighting.ambient);
+            sourceGridOutlineMaterial.SetFloat(SourceSpecularIntensityId, sourceLighting.specular);
+            sourceGridOutlineMaterial.SetFloat(SourceFresnelIntensityId, sourceLighting.fresnel);
+            sourceGridOutlineMaterial.SetFloat(SourceRefractionLitBlendId, sourceRefractionLitBlend);
+        }
+
+        void GetSourceDisplayDrawParameters(out MeshTopology topology, out int indexCount)
+        {
+            var drawOutline = sourceDisplayMode == SourceDisplayMode.Outline;
+            topology = drawOutline ? MeshTopology.Lines : MeshTopology.Triangles;
+            indexCount = drawOutline ? lineVertexCount : drawVertexCount;
         }
 
         static Vector3 Refract(Vector3 incident, Vector3 normal, float eta)
@@ -1307,7 +1340,7 @@ namespace CausticMeshDxr
 
         void OnDisable()
         {
-            RenderPipelineManager.endCameraRendering -= DrawSourceGridInSceneView;
+            ActiveInstances.Remove(this);
             ReleaseResources();
         }
 
@@ -1369,8 +1402,6 @@ namespace CausticMeshDxr
                     DestroyImmediate(sourceGridOutlineMaterial);
                 sourceGridOutlineMaterial = null;
             }
-            sourceGridOutlineCommandBuffer?.Release();
-            sourceGridOutlineCommandBuffer = null;
         }
     }
 }

@@ -462,8 +462,17 @@ MonoBehaviour:
   receiverBoundaryNormalAngle: 30
   subdivideReceiverBoundaries: 1
   maxSubdividedTriangles: 262144
-  showSourceGrid: 0
+  sourceDisplayMode: 3
   sourceGridColor: {r: 0, g: 1, b: 1, a: 1}
+  sourceSurfaceColor: {r: 0.03322799, g: 0.25786018, b: 0.468, a: 0.4}
+  sourceSmoothness: 0.85
+  sourceLighting:
+    mainLight: 1
+    ambient: 1
+    specular: 0
+    fresnel: 0.05
+  sourceRefractionStrength: 50
+  sourceRefractionLitBlend: 0
   enableValidation: 0
   runContinuously: 0
   scalarRelativeTolerance: 0.001
