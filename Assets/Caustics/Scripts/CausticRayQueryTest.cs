@@ -50,6 +50,10 @@ namespace CausticMeshDxr
         static readonly int EdgeCountId = Shader.PropertyToID("_EdgeCount");
         static readonly int MaxOutputTrianglesId = Shader.PropertyToID("_MaxOutputTriangles");
         static readonly int EnableSubdivisionId = Shader.PropertyToID("_EnableSubdivision");
+        static readonly int HeightMapId = Shader.PropertyToID("_HeightMap");
+        static readonly int HeightMapSizeId = Shader.PropertyToID("_HeightMapSize");
+        static readonly int GridCellSizeId = Shader.PropertyToID("_GridCellSize");
+        static readonly int ActualSourceSizeId = Shader.PropertyToID("_ActualSourceSize");
 
         [Header("Scene")]
         [SerializeField] MeshRenderer[] receivers;
@@ -61,13 +65,7 @@ namespace CausticMeshDxr
         [Header("Input Surface")]
         [SerializeField] Vector2 sourceSize = new(2, 2);
         [SerializeField, Min(0.001f)] float cellSize = 0.25f;
-        [SerializeField, Range(0, 0.25f)] float waveAmplitude = 0.03f;
-        [SerializeField, Min(0.001f)] float waveLength = 1;
-        [SerializeField] Vector2 waveCenter;
-        [SerializeField, Min(0.0001f)] float waveCenterSmoothing = 0.05f;
-        [SerializeField] bool animateWave;
-        [SerializeField] float waveSpeed = 1;
-        [SerializeField, Range(0, 1)] float wavePhase;
+        [SerializeField] CausticHeightField heightField;
 
         [Header("Refraction")]
         [SerializeField, Min(1)] float transmittedRefractiveIndex = 1.333f;
@@ -90,6 +88,7 @@ namespace CausticMeshDxr
         [SerializeField] Color sourceGridColor = Color.cyan;
 
         [Header("Validation")]
+        [SerializeField] bool enableValidation;
         [SerializeField] bool runContinuously;
         [SerializeField, Min(0)] float scalarRelativeTolerance = 0.001f;
         [SerializeField, Min(0)] float densityRelativeTolerance = 0.005f;
@@ -127,6 +126,7 @@ namespace CausticMeshDxr
         CommandBuffer sourceGridOutlineCommandBuffer;
         readonly List<ReceiverState> receiverStates = new();
         int traceKernel;
+        int buildSourceVerticesFromHeightMapKernel;
         int buildTrianglesKernel;
         int clearEdgeFlagsKernel;
         int markBoundaryEdgesKernel;
@@ -141,6 +141,9 @@ namespace CausticMeshDxr
         bool hasDispatched;
         Matrix4x4 lastSourceTransform;
         Vector3 lastIncidentDirection;
+        CausticHeightField lastHeightField;
+        int lastHeightFieldStateHash;
+        bool lastEnableValidation;
         RayHit[] validationHits;
         TriangleResult[] validationTriangleResults;
         uint validationHitsGeneration;
@@ -224,29 +227,28 @@ namespace CausticMeshDxr
             if (GridTopologyChanged())
                 RebuildGridData();
 
-            var angularFrequency = 2f * Mathf.PI / Mathf.Max(0.001f, waveLength);
-            var phaseOffset = 2f * Mathf.PI * (animateWave ? Time.time * waveSpeed : wavePhase);
-            var smoothing = Mathf.Max(0.0001f, waveCenterSmoothing);
             var gridCellSize = actualSourceSize.x / cellCountX;
+            var evaluationTime = Application.isPlaying ? Time.time : 0;
             for (var z = 0; z <= cellCountZ; z++)
             {
                 for (var x = 0; x <= cellCountX; x++)
                 {
                     var localX = x * gridCellSize - actualSourceSize.x * 0.5f;
                     var localZ = z * gridCellSize - actualSourceSize.y * 0.5f;
-                    var offsetX = localX - waveCenter.x;
-                    var offsetZ = localZ - waveCenter.y;
-                    var smoothDistance = Mathf.Sqrt(offsetX * offsetX + offsetZ * offsetZ + smoothing * smoothing);
-                    var radius = smoothDistance - smoothing;
-                    var phase = angularFrequency * radius - phaseOffset;
-                    var height = waveAmplitude * Mathf.Sin(phase);
-                    var radialSlope = waveAmplitude * angularFrequency * Mathf.Cos(phase);
-                    var derivativeX = radialSlope * offsetX / smoothDistance;
-                    var derivativeZ = radialSlope * offsetZ / smoothDistance;
+                    var height = 0f;
+                    var gradient = Vector2.zero;
+                    if (heightField != null)
+                    {
+                        heightField.Evaluate(
+                            new Vector2(localX, localZ),
+                            evaluationTime,
+                            out height,
+                            out gradient);
+                    }
                     sourceVertices[z * (cellCountX + 1) + x] = new SourceVertex
                     {
                         position = new Vector3(localX, height, localZ),
-                        normal = new Vector3(-derivativeX, 1, -derivativeZ).normalized,
+                        normal = new Vector3(-gradient.x, 1, -gradient.y).normalized,
                     };
                 }
             }
@@ -319,6 +321,8 @@ namespace CausticMeshDxr
         {
             RebuildGridData();
             UpdateSourceVertices();
+            lastHeightField = heightField;
+            lastHeightFieldStateHash = heightField != null ? heightField.StateHash : 0;
             EnsureSourceGridOutlineResources();
             RenderPipelineManager.endCameraRendering += DrawSourceGridInSceneView;
             hasDispatched = false;
@@ -331,6 +335,7 @@ namespace CausticMeshDxr
             cellSize = Mathf.Max(0.001f, cellSize);
             if (initialized && (GridTopologyChanged()
                 || ReceiversChanged()
+                || enableValidation != lastEnableValidation
                 || projectedResultBuffer == null
                 || projectedResultBuffer.count != triangleCount + Mathf.Max(4, maxSubdividedTriangles)))
                 ReleaseResources();
@@ -346,6 +351,13 @@ namespace CausticMeshDxr
         {
             if (!Application.isPlaying)
             {
+                var heightFieldStateHash = heightField != null ? heightField.StateHash : 0;
+                if (heightField != lastHeightField || heightFieldStateHash != lastHeightFieldStateHash)
+                {
+                    UpdateSourceVertices();
+                    lastHeightField = heightField;
+                    lastHeightFieldStateHash = heightFieldStateHash;
+                }
                 EnsureSourceGridOutlineResources();
                 return;
             }
@@ -357,9 +369,14 @@ namespace CausticMeshDxr
             var sourceTransform = transform.localToWorldMatrix;
             var changed = sourceTransform != lastSourceTransform
                 || ReceiverTransformsChanged()
-                || incidentDirection != lastIncidentDirection;
+                || incidentDirection != lastIncidentDirection
+                || heightField != lastHeightField
+                || (heightField != null && heightField.StateHash != lastHeightFieldStateHash);
 
-            if (!runContinuously && !animateWave && hasDispatched && !changed)
+            if (!runContinuously
+                && (heightField == null || !heightField.IsTimeVarying)
+                && hasDispatched
+                && !changed)
             {
                 QueueProjectedGrid();
                 QueueSourceGridOutline();
@@ -371,6 +388,8 @@ namespace CausticMeshDxr
             Dispatch(incidentDirection);
             lastSourceTransform = sourceTransform;
             lastIncidentDirection = incidentDirection;
+            lastHeightField = heightField;
+            lastHeightFieldStateHash = heightField != null ? heightField.StateHash : 0;
             hasDispatched = true;
             QueueProjectedGrid();
             QueueSourceGridOutline();
@@ -557,6 +576,15 @@ namespace CausticMeshDxr
                 enabled = false;
                 return false;
             }
+            if (heightField != null
+                && !(enableValidation
+                    ? heightField.TryValidateCpu(out var heightFieldError)
+                    : heightField.TryValidate(out heightFieldError)))
+            {
+                Debug.LogError(heightFieldError, heightField);
+                enabled = false;
+                return false;
+            }
 
             var settings = new RayTracingAccelerationStructure.Settings
             {
@@ -682,6 +710,7 @@ namespace CausticMeshDxr
             projectedTriangleMaterial.SetInt(VertexCountId, vertexCount);
 
             traceKernel = rayQueryShader.FindKernel("TraceVertices");
+            buildSourceVerticesFromHeightMapKernel = rayQueryShader.FindKernel("BuildSourceVerticesFromHeightMap");
             buildTrianglesKernel = rayQueryShader.FindKernel("BuildTriangles");
             clearEdgeFlagsKernel = rayQueryShader.FindKernel("ClearEdgeFlags");
             markBoundaryEdgesKernel = rayQueryShader.FindKernel("MarkBoundaryEdges");
@@ -691,6 +720,9 @@ namespace CausticMeshDxr
             initialized = true;
             lastSourceTransform = transform.localToWorldMatrix;
             lastIncidentDirection = directionalLight.transform.forward.normalized;
+            lastHeightField = heightField;
+            lastHeightFieldStateHash = heightField != null ? heightField.StateHash : 0;
+            lastEnableValidation = enableValidation;
 
             Debug.Log(
                 $"Caustic grid initialized with {vertexCount} shared vertices and {triangleCount} triangles "
@@ -703,7 +735,8 @@ namespace CausticMeshDxr
 
         void Dispatch(Vector3 incidentDirection)
         {
-            UpdateSourceVertices();
+            if (!TryDispatchSourceVerticesGpu())
+                UpdateSourceVertices();
             dispatchGeneration++;
             var currentGeneration = dispatchGeneration;
             var currentResourceGeneration = resourceGeneration;
@@ -773,6 +806,12 @@ namespace CausticMeshDxr
                     ? (int)BlendMode.DstColor
                     : (int)BlendMode.One);
             projectedTriangleMaterial.SetInt(DestinationBlendId, (int)BlendMode.One);
+            if (!enableValidation)
+            {
+                validationRefreshRequested = false;
+                return;
+            }
+
             if (readbackPendingCount != 0)
             {
                 validationRefreshRequested = true;
@@ -885,6 +924,39 @@ namespace CausticMeshDxr
             });
         }
 
+        bool TryDispatchSourceVerticesGpu()
+        {
+            if (enableValidation || heightField == null)
+                return false;
+
+            var heightMapWidth = cellCountX + 1;
+            var heightMapHeight = cellCountZ + 1;
+            if (!heightField.TryDispatchGpuHeightMap(
+                    rayQueryShader,
+                    heightMapWidth,
+                    heightMapHeight,
+                    actualSourceSize,
+                    Time.time,
+                    Time.deltaTime,
+                    out var heightMap))
+                return false;
+
+            rayQueryShader.SetBuffer(buildSourceVerticesFromHeightMapKernel, SourceVerticesId, sourceVertexBuffer);
+            rayQueryShader.SetTexture(buildSourceVerticesFromHeightMapKernel, HeightMapId, heightMap);
+            rayQueryShader.SetInt(VertexCountId, vertexCount);
+            rayQueryShader.SetInts(HeightMapSizeId, heightMapWidth, heightMapHeight);
+            rayQueryShader.SetFloat(GridCellSizeId, actualSourceSize.x / cellCountX);
+            rayQueryShader.SetVector(
+                ActualSourceSizeId,
+                new Vector4(actualSourceSize.x, actualSourceSize.y, 0, 0));
+            rayQueryShader.Dispatch(
+                buildSourceVerticesFromHeightMapKernel,
+                DivideRoundUp(vertexCount, ComputeThreadCount),
+                1,
+                1);
+            return true;
+        }
+
         static int DivideRoundUp(int value, int divisor)
         {
             return (value + divisor - 1) / divisor;
@@ -895,7 +967,7 @@ namespace CausticMeshDxr
             if (this != null && completedResourceGeneration == resourceGeneration)
             {
                 readbackPendingCount = Mathf.Max(0, readbackPendingCount - 1);
-                if (readbackPendingCount == 0 && validationRefreshRequested)
+                if (readbackPendingCount == 0 && validationRefreshRequested && enableValidation)
                 {
                     validationRefreshRequested = false;
                     hasDispatched = false;
@@ -1147,7 +1219,7 @@ namespace CausticMeshDxr
             var diameter = Mathf.Sqrt(
                 actualSourceSize.x * actualSourceSize.x
                 + actualSourceSize.y * actualSourceSize.y
-                + 4 * waveAmplitude * waveAmplitude) * maxScale;
+                + 4 * Mathf.Pow(heightField != null ? heightField.MaximumAbsoluteHeight : 0, 2)) * maxScale;
             var bounds = new Bounds(transform.TransformPoint(Vector3.zero), Vector3.one * Mathf.Max(0.01f, diameter));
             Graphics.DrawProcedural(
                 sourceGridOutlineMaterial,

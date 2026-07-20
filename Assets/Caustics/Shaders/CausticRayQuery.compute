@@ -1,4 +1,9 @@
 #pragma kernel TraceVertices
+#pragma kernel BuildRadialSineHeightMap
+#pragma kernel BuildTextureHeightMap
+#pragma kernel ClearWaveHeightMap
+#pragma kernel BuildWaveHeightMap
+#pragma kernel BuildSourceVerticesFromHeightMap
 #pragma kernel BuildTriangles
 #pragma kernel ClearEdgeFlags
 #pragma kernel MarkBoundaryEdges
@@ -53,7 +58,7 @@ struct ProjectedResult
     uint padding;
 };
 
-StructuredBuffer<SourceVertex> _SourceVertices;
+RWStructuredBuffer<SourceVertex> _SourceVertices;
 StructuredBuffer<uint> _SourceIndices;
 RWStructuredBuffer<RayHit> _Hits;
 RWStructuredBuffer<TriangleResult> _TriangleResults;
@@ -81,6 +86,130 @@ float _ReceiverBoundaryNormalCos;
 uint _EdgeCount;
 uint _MaxOutputTriangles;
 uint _EnableSubdivision;
+uint2 _HeightMapSize;
+float2 _HeightMapSourceSize;
+float _GridCellSize;
+float2 _ActualSourceSize;
+float _HeightFieldAmplitude;
+float _HeightFieldAngularFrequency;
+float2 _HeightFieldCenter;
+float _HeightFieldCenterSmoothing;
+float _HeightFieldPhaseOffset;
+RWTexture2D<float> _HeightMapOutput;
+Texture2D<float> _HeightMap;
+Texture2D<float4> _HeightTexture;
+SamplerState sampler_HeightTexture;
+float2 _TextureFieldSize;
+float2 _TextureFieldCenter;
+float _TextureHeightScale;
+float _TextureHeightOffset;
+Texture2D<float> _WavePrevious;
+Texture2D<float> _WaveCurrent;
+RWTexture2D<float> _WaveNext;
+float _WaveStepCoefficient;
+float _WaveDamping;
+float2 _WaveSourceCenter;
+float _WaveSourceRadius;
+float _WaveSourceHeight;
+
+[numthreads(8, 8, 1)]
+void BuildRadialSineHeightMap(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= _HeightMapSize))
+        return;
+
+    const float2 denominator = max(float2(_HeightMapSize - 1), 1.0);
+    const float2 localPosition = (float2(id.xy) / denominator - 0.5) * _HeightMapSourceSize;
+    const float2 offset = localPosition - _HeightFieldCenter;
+    const float smoothing = max(0.0001, _HeightFieldCenterSmoothing);
+    const float smoothDistance = sqrt(dot(offset, offset) + smoothing * smoothing);
+    const float radius = smoothDistance - smoothing;
+    const float wavePhase = _HeightFieldAngularFrequency * radius - _HeightFieldPhaseOffset;
+    _HeightMapOutput[id.xy] = _HeightFieldAmplitude * sin(wavePhase);
+}
+
+[numthreads(8, 8, 1)]
+void BuildTextureHeightMap(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= _HeightMapSize))
+        return;
+
+    const float2 denominator = max(float2(_HeightMapSize - 1), 1.0);
+    const float2 localPosition = (float2(id.xy) / denominator - 0.5) * _HeightMapSourceSize;
+    const float2 safeFieldSize = max(abs(_TextureFieldSize), 0.0001);
+    const float2 uv = (localPosition - _TextureFieldCenter) / safeFieldSize + 0.5;
+    const float textureHeight = _HeightTexture.SampleLevel(sampler_HeightTexture, uv, 0).r;
+    _HeightMapOutput[id.xy] = _TextureHeightOffset + _TextureHeightScale * textureHeight;
+}
+
+[numthreads(8, 8, 1)]
+void ClearWaveHeightMap(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= _HeightMapSize))
+        return;
+    _WaveNext[id.xy] = 0;
+}
+
+[numthreads(8, 8, 1)]
+void BuildWaveHeightMap(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= _HeightMapSize))
+        return;
+
+    if (id.x == 0 || id.y == 0 || id.x + 1 == _HeightMapSize.x || id.y + 1 == _HeightMapSize.y)
+    {
+        _WaveNext[id.xy] = 0;
+        return;
+    }
+
+    const float current = _WaveCurrent.Load(int3(id.xy, 0));
+    const float previous = _WavePrevious.Load(int3(id.xy, 0));
+    const float laplacian =
+        _WaveCurrent.Load(int3(id.x - 1, id.y, 0))
+        + _WaveCurrent.Load(int3(id.x + 1, id.y, 0))
+        + _WaveCurrent.Load(int3(id.x, id.y - 1, 0))
+        + _WaveCurrent.Load(int3(id.x, id.y + 1, 0))
+        - 4 * current;
+    float next = (2 - _WaveDamping) * current
+        - (1 - _WaveDamping) * previous
+        + _WaveStepCoefficient * laplacian;
+
+    const float2 denominator = max(float2(_HeightMapSize - 1), 1.0);
+    const float2 localPosition = (float2(id.xy) / denominator - 0.5) * _HeightMapSourceSize;
+    const float sourceDistance = distance(localPosition, _WaveSourceCenter);
+    const float sourceWeight = saturate(1 - sourceDistance / max(_WaveSourceRadius, 0.0001));
+    next = lerp(next, _WaveSourceHeight, sourceWeight * sourceWeight);
+    _WaveNext[id.xy] = next;
+}
+
+[numthreads(64, 1, 1)]
+void BuildSourceVerticesFromHeightMap(uint3 id : SV_DispatchThreadID)
+{
+    const uint vertexIndex = id.x;
+    if (vertexIndex >= _VertexCount)
+        return;
+
+    const uint width = _HeightMapSize.x;
+    const uint x = vertexIndex % width;
+    const uint z = vertexIndex / width;
+    const uint leftX = x > 0 ? x - 1 : x;
+    const uint rightX = min(x + 1, width - 1);
+    const uint bottomZ = z > 0 ? z - 1 : z;
+    const uint topZ = min(z + 1, _HeightMapSize.y - 1);
+    const float height = _HeightMap.Load(int3(x, z, 0));
+    const float leftHeight = _HeightMap.Load(int3(leftX, z, 0));
+    const float rightHeight = _HeightMap.Load(int3(rightX, z, 0));
+    const float bottomHeight = _HeightMap.Load(int3(x, bottomZ, 0));
+    const float topHeight = _HeightMap.Load(int3(x, topZ, 0));
+    const float gradientX = (rightHeight - leftHeight) / max((rightX - leftX) * _GridCellSize, 0.000001);
+    const float gradientZ = (topHeight - bottomHeight) / max((topZ - bottomZ) * _GridCellSize, 0.000001);
+    const float2 localPosition = float2(x, z) * _GridCellSize - _ActualSourceSize * 0.5;
+
+    SourceVertex result;
+    result.position = float3(localPosition.x, height, localPosition.y);
+    result.normal = normalize(float3(-gradientX, 1, -gradientZ));
+    _SourceVertices[vertexIndex] = result;
+}
 
 uint GetBoundaryReason(RayHit a, RayHit b)
 {

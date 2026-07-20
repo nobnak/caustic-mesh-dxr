@@ -403,6 +403,8 @@ GameObject:
   m_Component:
   - component: {fileID: 406132100}
   - component: {fileID: 406132101}
+  - component: {fileID: 406132102}
+  - component: {fileID: 406132103}
   m_Layer: 0
   m_Name: Input Surface
   m_TagString: Untagged
@@ -447,13 +449,7 @@ MonoBehaviour:
   sourceGridOutlineShader: {fileID: 4800000, guid: d5d9f9c1853c47a1b7c45a0f7be6d201, type: 3}
   sourceSize: {x: 5, y: 5}
   cellSize: 0.01
-  waveAmplitude: 0.032
-  waveLength: 1
-  waveCenter: {x: 0, y: 0}
-  waveCenterSmoothing: 0.05
-  animateWave: 1
-  waveSpeed: 0.3
-  wavePhase: 0
+  heightField: {fileID: 406132103}
   transmittedRefractiveIndex: 1.333
   rayTMin: 0.001
   rayTMax: 100
@@ -468,9 +464,49 @@ MonoBehaviour:
   maxSubdividedTriangles: 262144
   showSourceGrid: 0
   sourceGridColor: {r: 0, g: 1, b: 1, a: 1}
+  enableValidation: 0
   runContinuously: 0
   scalarRelativeTolerance: 0.001
   densityRelativeTolerance: 0.005
+--- !u!114 &406132102
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 406132099}
+  m_Enabled: 0
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a5e9298eb73a4c7e9c1c9e62f8b87d3d, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  amplitude: 0.032
+  waveLength: 1
+  center: {x: 0, y: 0}
+  centerSmoothing: 0.05
+  animate: 1
+  speed: 0.3
+  phase: 0
+--- !u!114 &406132103
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 406132099}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 1e0cb87636144ef69d232228740561cb, type: 3}
+  m_Name:
+  m_EditorClassIdentifier: Assembly-CSharp::CausticMeshDxr.WaveEquationHeightField
+  simulate: 1
+  waveSpeed: 0.3
+  damping: 0.5
+  simulationRate: 60
+  sourceCenter: {x: 0, y: 0}
+  sourceRadius: 0.15
+  sourceAmplitude: 0.05
+  sourceFrequency: 1
 --- !u!1 &410087039
 GameObject:
   m_ObjectHideFlags: 0
