@@ -61,7 +61,7 @@ Shader "Hidden/Caustics/Projected Triangle"
             struct Varyings
             {
                 float4 positionCS : SV_POSITION;
-                nointerpolation float intensity : TEXCOORD0;
+                float intensity : TEXCOORD0;
                 nointerpolation float valid : TEXCOORD1;
                 nointerpolation float receiverBoundary : TEXCOORD2;
             };
