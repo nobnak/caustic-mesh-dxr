@@ -19,19 +19,15 @@ namespace CausticMeshDxr
 
         static readonly int BasePositionsId = Shader.PropertyToID("_BasePositions");
         static readonly int VertexBufferId = Shader.PropertyToID("_VertexBuffer");
-        static readonly int IndexBufferId = Shader.PropertyToID("_IndexBuffer");
-        static readonly int PrimitiveNormalsId = Shader.PropertyToID("_PrimitiveNormals");
+        static readonly int PositionBufferId = Shader.PropertyToID("_PositionBuffer");
         static readonly int VertexCountId = Shader.PropertyToID("_VertexCount");
-        static readonly int PrimitiveCountId = Shader.PropertyToID("_PrimitiveCount");
         static readonly int VertexStrideId = Shader.PropertyToID("_VertexStride");
         static readonly int PositionOffsetId = Shader.PropertyToID("_PositionOffset");
         static readonly int NormalOffsetId = Shader.PropertyToID("_NormalOffset");
-        static readonly int PrimitiveOffsetId = Shader.PropertyToID("_PrimitiveOffset");
         static readonly int SizeId = Shader.PropertyToID("_Size");
         static readonly int AmplitudeId = Shader.PropertyToID("_Amplitude");
         static readonly int FrequencyId = Shader.PropertyToID("_Frequency");
         static readonly int AnimationOffsetId = Shader.PropertyToID("_AnimationOffset");
-        static readonly int NormalToWorldId = Shader.PropertyToID("_NormalToWorld");
         static readonly int GridPlaneId = Shader.PropertyToID("_GridPlane");
 
         [SerializeField] ComputeShader deformationShader;
@@ -48,9 +44,9 @@ namespace CausticMeshDxr
         Mesh originalMesh;
         GraphicsBuffer basePositionBuffer;
         GraphicsBuffer meshVertexBuffer;
-        GraphicsBuffer meshIndexBuffer;
+        GraphicsBuffer positionBuffer;
+        GraphicsBuffer indexBuffer;
         int deformKernel;
-        int buildPrimitiveNormalsKernel;
         int vertexCount;
         int primitiveCount;
         int vertexStride;
@@ -72,13 +68,11 @@ namespace CausticMeshDxr
 
         public override uint TopologyVersion => topologyVersion;
 
-        public override GraphicsBuffer VertexBuffer => meshVertexBuffer;
-
-        public override GraphicsBuffer IndexBuffer => meshIndexBuffer;
-
-        public override int VertexStride => vertexStride;
-
-        public override int PositionOffset => positionOffset;
+        public override CausticReceiverGeometryView GeometryView => new(
+            positionBuffer,
+            indexBuffer,
+            vertexCount,
+            primitiveCount);
 
         public override Mesh PrepareMesh()
         {
@@ -92,53 +86,32 @@ namespace CausticMeshDxr
             return runtimeMesh;
         }
 
-        public override bool DispatchGeometry(
-            float time,
-            GraphicsBuffer primitiveNormalBuffer,
-            int primitiveOffset,
-            Matrix4x4 normalToWorld,
-            bool forceNormalUpdate)
+        public override bool DispatchGeometry(float time)
         {
-            if (deformationShader == null || primitiveNormalBuffer == null)
+            if (deformationShader == null)
                 return false;
 
             PrepareMesh();
             var updateVertices = geometryDirty || IsTimeVarying;
-            if (!updateVertices && !forceNormalUpdate)
+            if (!updateVertices)
                 return false;
 
-            if (updateVertices)
-            {
-                deformationShader.SetBuffer(deformKernel, BasePositionsId, basePositionBuffer);
-                deformationShader.SetBuffer(deformKernel, VertexBufferId, meshVertexBuffer);
-                deformationShader.SetInt(VertexCountId, vertexCount);
-                deformationShader.SetInt(VertexStrideId, vertexStride);
-                deformationShader.SetInt(PositionOffsetId, positionOffset);
-                deformationShader.SetInt(NormalOffsetId, normalOffset);
-                deformationShader.SetInt(GridPlaneId, (int)gridPlane);
-                deformationShader.SetVector(SizeId, new Vector4(size.x, size.y, 0, 0));
-                deformationShader.SetFloat(AmplitudeId, amplitude);
-                deformationShader.SetFloat(FrequencyId, frequency);
-                deformationShader.SetVector(
-                    AnimationOffsetId,
-                    animate ? animationDirection * (animationSpeed * time) : Vector2.zero);
-                deformationShader.Dispatch(deformKernel, DivideRoundUp(vertexCount, ThreadCount), 1, 1);
-                geometryDirty = false;
-            }
-
-            deformationShader.SetBuffer(buildPrimitiveNormalsKernel, VertexBufferId, meshVertexBuffer);
-            deformationShader.SetBuffer(buildPrimitiveNormalsKernel, IndexBufferId, meshIndexBuffer);
-            deformationShader.SetBuffer(buildPrimitiveNormalsKernel, PrimitiveNormalsId, primitiveNormalBuffer);
-            deformationShader.SetInt(PrimitiveCountId, primitiveCount);
+            deformationShader.SetBuffer(deformKernel, BasePositionsId, basePositionBuffer);
+            deformationShader.SetBuffer(deformKernel, VertexBufferId, meshVertexBuffer);
+            deformationShader.SetBuffer(deformKernel, PositionBufferId, positionBuffer);
+            deformationShader.SetInt(VertexCountId, vertexCount);
             deformationShader.SetInt(VertexStrideId, vertexStride);
             deformationShader.SetInt(PositionOffsetId, positionOffset);
-            deformationShader.SetInt(PrimitiveOffsetId, primitiveOffset);
-            deformationShader.SetMatrix(NormalToWorldId, normalToWorld);
-            deformationShader.Dispatch(
-                buildPrimitiveNormalsKernel,
-                DivideRoundUp(primitiveCount, ThreadCount),
-                1,
-                1);
+            deformationShader.SetInt(NormalOffsetId, normalOffset);
+            deformationShader.SetInt(GridPlaneId, (int)gridPlane);
+            deformationShader.SetVector(SizeId, new Vector4(size.x, size.y, 0, 0));
+            deformationShader.SetFloat(AmplitudeId, amplitude);
+            deformationShader.SetFloat(FrequencyId, frequency);
+            deformationShader.SetVector(
+                AnimationOffsetId,
+                animate ? animationDirection * (animationSpeed * time) : Vector2.zero);
+            deformationShader.Dispatch(deformKernel, DivideRoundUp(vertexCount, ThreadCount), 1, 1);
+            geometryDirty = false;
             return updateVertices;
         }
 
@@ -221,15 +194,21 @@ namespace CausticMeshDxr
                 vertexCount,
                 Marshal.SizeOf<Vector3>());
             basePositionBuffer.SetData(basePositions);
+            positionBuffer = new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured,
+                vertexCount,
+                Marshal.SizeOf<Vector3>());
+            positionBuffer.SetData(basePositions);
+            indexBuffer = new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured,
+                indices.Length,
+                sizeof(uint));
+            indexBuffer.SetData(indices);
             meshVertexBuffer = runtimeMesh.GetVertexBuffer(0);
-            meshIndexBuffer = runtimeMesh.GetIndexBuffer();
             vertexStride = runtimeMesh.GetVertexBufferStride(0);
             positionOffset = runtimeMesh.GetVertexAttributeOffset(VertexAttribute.Position);
             normalOffset = runtimeMesh.GetVertexAttributeOffset(VertexAttribute.Normal);
             deformKernel = deformationShader != null ? deformationShader.FindKernel("DeformNoiseGrid") : -1;
-            buildPrimitiveNormalsKernel = deformationShader != null
-                ? deformationShader.FindKernel("BuildPrimitiveNormals")
-                : -1;
             size = safeSize;
             cellsPerAxis = safeCells;
             topologyDirty = false;
@@ -261,8 +240,10 @@ namespace CausticMeshDxr
                 meshFilter.sharedMesh = originalMesh;
             meshVertexBuffer?.Dispose();
             meshVertexBuffer = null;
-            meshIndexBuffer?.Dispose();
-            meshIndexBuffer = null;
+            positionBuffer?.Dispose();
+            positionBuffer = null;
+            indexBuffer?.Dispose();
+            indexBuffer = null;
             basePositionBuffer?.Dispose();
             basePositionBuffer = null;
             if (runtimeMesh != null)

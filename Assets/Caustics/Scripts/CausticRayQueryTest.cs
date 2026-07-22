@@ -24,6 +24,11 @@ namespace CausticMeshDxr
         static readonly int TriangleResultsId = Shader.PropertyToID("_TriangleResults");
         static readonly int ReceiverPrimitiveOffsetsId = Shader.PropertyToID("_ReceiverPrimitiveOffsets");
         static readonly int ReceiverPrimitiveNormalsId = Shader.PropertyToID("_ReceiverPrimitiveNormals");
+        static readonly int ReceiverPositionsId = Shader.PropertyToID("_ReceiverPositions");
+        static readonly int ReceiverIndicesId = Shader.PropertyToID("_ReceiverIndices");
+        static readonly int ReceiverPrimitiveCountId = Shader.PropertyToID("_ReceiverPrimitiveCount");
+        static readonly int ReceiverPrimitiveOffsetId = Shader.PropertyToID("_ReceiverPrimitiveOffset");
+        static readonly int ReceiverNormalToWorldId = Shader.PropertyToID("_ReceiverNormalToWorld");
         static readonly int SourceLocalToWorldId = Shader.PropertyToID("_SourceLocalToWorld");
         static readonly int SourceNormalToWorldId = Shader.PropertyToID("_SourceNormalToWorld");
         static readonly int VertexCountId = Shader.PropertyToID("_VertexCount");
@@ -150,6 +155,7 @@ namespace CausticMeshDxr
         int traceEdgeMidpointsKernel;
         int buildProjectedTrianglesKernel;
         int buildOutputArgsKernel;
+        int buildReceiverPrimitiveNormalsKernel;
         bool initialized;
         int readbackPendingCount;
         uint dispatchGeneration;
@@ -174,7 +180,7 @@ namespace CausticMeshDxr
             public Matrix4x4 lastTransform;
             public uint instanceId;
             public int primitiveOffset;
-            public Vector3[] localPrimitiveNormals;
+            public CausticReceiverGeometryView geometryView;
             public uint topologyVersion;
         }
 
@@ -484,7 +490,7 @@ namespace CausticMeshDxr
         void UpdateReceiverGeometryAndTransforms()
         {
             var accelerationStructureChanged = false;
-            var normalBufferRequiresCpuRefresh = false;
+            var geometryChanged = false;
             for (var i = 0; i < receiverStates.Count; i++)
             {
                 var state = receiverStates[i];
@@ -494,24 +500,21 @@ namespace CausticMeshDxr
                     accelerationStructure.UpdateInstanceTransform(state.handle, transformMatrix);
                     state.lastTransform = transformMatrix;
                     accelerationStructureChanged = true;
-                    normalBufferRequiresCpuRefresh = true;
+                    geometryChanged = true;
                 }
             }
-
-            if (normalBufferRequiresCpuRefresh)
-                UpdateReceiverPrimitiveNormals();
 
             for (var i = 0; i < receiverStates.Count; i++)
             {
                 var state = receiverStates[i];
-                if (state.geometry == null)
-                    continue;
-                accelerationStructureChanged |= state.geometry.DispatchGeometry(
-                    Time.time,
-                    receiverPrimitiveNormalBuffer,
-                    state.primitiveOffset,
-                    state.renderer.transform.worldToLocalMatrix.transpose,
-                    normalBufferRequiresCpuRefresh);
+                if (state.geometry != null)
+                    geometryChanged |= state.geometry.DispatchGeometry(Time.time);
+            }
+
+            if (geometryChanged)
+            {
+                BuildReceiverPrimitiveNormals();
+                accelerationStructureChanged = true;
             }
 
             if (accelerationStructureChanged)
@@ -589,42 +592,68 @@ namespace CausticMeshDxr
             public uint padding;
         }
 
-        void UpdateReceiverPrimitiveNormals()
+        void BuildReceiverPrimitiveNormals()
         {
-            if (receiverPrimitiveNormalBuffer == null)
-                return;
-
-            var worldNormals = new Vector3[receiverPrimitiveNormalBuffer.count];
-            foreach (var state in receiverStates)
+            for (var i = 0; i < receiverStates.Count; i++)
             {
-                var normalMatrix = state.renderer.transform.worldToLocalMatrix.transpose;
-                for (var primitiveIndex = 0; primitiveIndex < state.localPrimitiveNormals.Length; primitiveIndex++)
-                {
-                    worldNormals[state.primitiveOffset + primitiveIndex] = normalMatrix
-                        .MultiplyVector(state.localPrimitiveNormals[primitiveIndex]).normalized;
-                }
+                var state = receiverStates[i];
+                if (!state.geometryView.IsValid)
+                    continue;
+                rayQueryShader.SetBuffer(
+                    buildReceiverPrimitiveNormalsKernel,
+                    ReceiverPositionsId,
+                    state.geometryView.positionBuffer);
+                rayQueryShader.SetBuffer(
+                    buildReceiverPrimitiveNormalsKernel,
+                    ReceiverIndicesId,
+                    state.geometryView.indexBuffer);
+                rayQueryShader.SetBuffer(
+                    buildReceiverPrimitiveNormalsKernel,
+                    ReceiverPrimitiveNormalsId,
+                    receiverPrimitiveNormalBuffer);
+                rayQueryShader.SetInt(ReceiverPrimitiveCountId, state.geometryView.primitiveCount);
+                rayQueryShader.SetInt(ReceiverPrimitiveOffsetId, state.primitiveOffset);
+                rayQueryShader.SetMatrix(
+                    ReceiverNormalToWorldId,
+                    state.renderer.transform.worldToLocalMatrix.transpose);
+                rayQueryShader.Dispatch(
+                    buildReceiverPrimitiveNormalsKernel,
+                    DivideRoundUp(state.geometryView.primitiveCount, ComputeThreadCount),
+                    1,
+                    1);
             }
-            receiverPrimitiveNormalBuffer.SetData(worldNormals);
         }
 
-        static Vector3[] CreatePrimitiveNormals(Mesh mesh)
+        static CausticReceiverGeometryView CreateStaticGeometryView(Mesh mesh)
         {
             using var meshDataArray = Mesh.AcquireReadOnlyMeshData(mesh);
             var meshData = meshDataArray[0];
-            using var vertices = new NativeArray<Vector3>(meshData.vertexCount, Allocator.Temp);
             var subMesh = meshData.GetSubMesh(0);
-            using var indices = new NativeArray<int>(subMesh.indexCount, Allocator.Temp);
-            meshData.GetVertices(vertices);
-            meshData.GetIndices(indices, 0);
-            var normals = new Vector3[indices.Length / 3];
-            for (var primitiveIndex = 0; primitiveIndex < normals.Length; primitiveIndex++)
-            {
-                var indexOffset = primitiveIndex * 3;
-                normals[primitiveIndex] = Vector3.Cross(
-                    vertices[indices[indexOffset + 1]] - vertices[indices[indexOffset]],
-                    vertices[indices[indexOffset + 2]] - vertices[indices[indexOffset]]).normalized;
-            }
-            return normals;
+            var positions = new NativeArray<Vector3>(meshData.vertexCount, Allocator.Temp);
+            var sourceIndices = new NativeArray<int>(subMesh.indexCount, Allocator.Temp);
+            meshData.GetVertices(positions);
+            meshData.GetIndices(sourceIndices, 0);
+            var indices = new uint[sourceIndices.Length];
+            for (var i = 0; i < indices.Length; i++)
+                indices[i] = (uint)sourceIndices[i];
+
+            var positionBuffer = new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured,
+                positions.Length,
+                Marshal.SizeOf<Vector3>());
+            positionBuffer.SetData(positions);
+            var indexBuffer = new GraphicsBuffer(
+                GraphicsBuffer.Target.Structured,
+                indices.Length,
+                sizeof(uint));
+            indexBuffer.SetData(indices);
+            positions.Dispose();
+            sourceIndices.Dispose();
+            return new CausticReceiverGeometryView(
+                positionBuffer,
+                indexBuffer,
+                meshData.vertexCount,
+                indices.Length / 3);
         }
 
         bool EnsureInitialized()
@@ -666,6 +695,10 @@ namespace CausticMeshDxr
                 return false;
             }
 
+            // Receiver normals are generated while receiver state is being
+            // initialized, so resolve this kernel before the first dispatch.
+            buildReceiverPrimitiveNormalsKernel = rayQueryShader.FindKernel("BuildReceiverPrimitiveNormals");
+
             var settings = new RayTracingAccelerationStructure.Settings
             {
                 managementMode = RayTracingAccelerationStructure.ManagementMode.Manual,
@@ -699,7 +732,21 @@ namespace CausticMeshDxr
                     enabled = false;
                     return false;
                 }
-                var primitiveNormals = CreatePrimitiveNormals(mesh);
+                var geometryView = geometry != null
+                    ? geometry.GeometryView
+                    : CreateStaticGeometryView(mesh);
+                if (!geometryView.IsValid)
+                {
+                    if (geometry == null)
+                    {
+                        geometryView.positionBuffer?.Dispose();
+                        geometryView.indexBuffer?.Dispose();
+                    }
+                    Debug.LogError($"Receiver {receiverIndex} did not provide valid geometry buffers.", receiver);
+                    ReleaseResources();
+                    enabled = false;
+                    return false;
+                }
 
                 var instanceConfig = new RayTracingMeshInstanceConfig(mesh, 0, null)
                 {
@@ -719,10 +766,10 @@ namespace CausticMeshDxr
                     lastTransform = receiverTransform,
                     instanceId = instanceId,
                     primitiveOffset = totalPrimitiveCount,
-                    localPrimitiveNormals = primitiveNormals,
+                    geometryView = geometryView,
                     topologyVersion = geometry != null ? geometry.TopologyVersion : 0,
                 });
-                totalPrimitiveCount += primitiveNormals.Length;
+                totalPrimitiveCount += geometryView.primitiveCount;
             }
             primitiveOffsets[receivers.Length + 1] = (uint)totalPrimitiveCount;
             receiverPrimitiveOffsetBuffer = new GraphicsBuffer(
@@ -734,16 +781,9 @@ namespace CausticMeshDxr
                 GraphicsBuffer.Target.Structured,
                 Mathf.Max(1, totalPrimitiveCount),
                 Marshal.SizeOf<Vector3>());
-            UpdateReceiverPrimitiveNormals();
             foreach (var state in receiverStates)
-            {
-                state.geometry?.DispatchGeometry(
-                    Application.isPlaying ? Time.time : 0,
-                    receiverPrimitiveNormalBuffer,
-                    state.primitiveOffset,
-                    state.renderer.transform.worldToLocalMatrix.transpose,
-                    true);
-            }
+                state.geometry?.DispatchGeometry(Application.isPlaying ? Time.time : 0);
+            BuildReceiverPrimitiveNormals();
             accelerationStructure.Build();
 
             UpdateSourceVertices();
@@ -1433,6 +1473,14 @@ namespace CausticMeshDxr
             readbackPendingCount = 0;
             dispatchGeneration = 0;
             validationRefreshRequested = false;
+            foreach (var state in receiverStates)
+            {
+                if (state.geometry == null)
+                {
+                    state.geometryView.positionBuffer?.Dispose();
+                    state.geometryView.indexBuffer?.Dispose();
+                }
+            }
             receiverStates.Clear();
             validationHits = null;
             validationTriangleResults = null;

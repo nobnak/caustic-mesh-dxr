@@ -1,23 +1,18 @@
 #pragma kernel DeformNoiseGrid
-#pragma kernel BuildPrimitiveNormals
 #pragma target 5.0
 
 StructuredBuffer<float3> _BasePositions;
 RWByteAddressBuffer _VertexBuffer;
-ByteAddressBuffer _IndexBuffer;
-RWStructuredBuffer<float3> _PrimitiveNormals;
+RWStructuredBuffer<float3> _PositionBuffer;
 
 uint _VertexCount;
-uint _PrimitiveCount;
 uint _VertexStride;
 uint _PositionOffset;
 uint _NormalOffset;
-uint _PrimitiveOffset;
 float2 _Size;
 float _Amplitude;
 float _Frequency;
 float2 _AnimationOffset;
-float4x4 _NormalToWorld;
 uint _GridPlane;
 
 float3 Mod289(float3 value)
@@ -80,11 +75,6 @@ void StoreFloat3(uint address, float3 value)
     _VertexBuffer.Store3(address, asuint(value));
 }
 
-float3 LoadPosition(uint vertexIndex)
-{
-    return asfloat(_VertexBuffer.Load3(vertexIndex * _VertexStride + _PositionOffset));
-}
-
 [numthreads(64, 1, 1)]
 void DeformNoiseGrid(uint3 id : SV_DispatchThreadID)
 {
@@ -110,22 +100,5 @@ void DeformNoiseGrid(uint3 id : SV_DispatchThreadID)
     const uint vertexAddress = id.x * _VertexStride;
     StoreFloat3(vertexAddress + _PositionOffset, position);
     StoreFloat3(vertexAddress + _NormalOffset, normal);
-}
-
-[numthreads(64, 1, 1)]
-void BuildPrimitiveNormals(uint3 id : SV_DispatchThreadID)
-{
-    if (id.x >= _PrimitiveCount)
-        return;
-
-    const uint indexAddress = id.x * 12;
-    const uint i0 = _IndexBuffer.Load(indexAddress);
-    const uint i1 = _IndexBuffer.Load(indexAddress + 4);
-    const uint i2 = _IndexBuffer.Load(indexAddress + 8);
-    const float3 p0 = LoadPosition(i0);
-    const float3 p1 = LoadPosition(i1);
-    const float3 p2 = LoadPosition(i2);
-    const float3 localNormal = normalize(cross(p1 - p0, p2 - p0));
-    _PrimitiveNormals[_PrimitiveOffset + id.x] = normalize(
-        mul((float3x3)_NormalToWorld, localNormal));
+    _PositionBuffer[id.x] = position;
 }

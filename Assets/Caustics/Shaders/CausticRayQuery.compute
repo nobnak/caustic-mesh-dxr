@@ -10,6 +10,7 @@
 #pragma kernel TraceEdgeMidpoints
 #pragma kernel BuildProjectedTriangles
 #pragma kernel BuildOutputArgs
+#pragma kernel BuildReceiverPrimitiveNormals
 #pragma require inlineraytracing
 
 #include "UnityRayQuery.cginc"
@@ -71,7 +72,9 @@ RWStructuredBuffer<ProjectedResult> _ProjectedResults;
 RWStructuredBuffer<uint> _OutputCounter;
 RWStructuredBuffer<uint> _OutputArgs;
 StructuredBuffer<uint> _ReceiverPrimitiveOffsets;
-StructuredBuffer<float3> _ReceiverPrimitiveNormals;
+RWStructuredBuffer<float3> _ReceiverPrimitiveNormals;
+StructuredBuffer<float3> _ReceiverPositions;
+StructuredBuffer<uint> _ReceiverIndices;
 
 float4x4 _SourceLocalToWorld;
 float4x4 _SourceNormalToWorld;
@@ -86,6 +89,9 @@ float _ReceiverBoundaryNormalCos;
 uint _EdgeCount;
 uint _MaxOutputTriangles;
 uint _EnableSubdivision;
+uint _ReceiverPrimitiveCount;
+uint _ReceiverPrimitiveOffset;
+float4x4 _ReceiverNormalToWorld;
 uint2 _HeightMapSize;
 float2 _HeightMapSourceSize;
 float _GridCellSize;
@@ -491,4 +497,24 @@ void BuildOutputArgs(uint3 dispatchThreadId : SV_DispatchThreadID)
     _OutputArgs[1] = 1;
     _OutputArgs[2] = 0;
     _OutputArgs[3] = 0;
+}
+
+[numthreads(64, 1, 1)]
+void BuildReceiverPrimitiveNormals(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    const uint primitiveIndex = dispatchThreadId.x;
+    if (primitiveIndex >= _ReceiverPrimitiveCount)
+        return;
+
+    const uint indexOffset = primitiveIndex * 3;
+    const float3 p0 = _ReceiverPositions[_ReceiverIndices[indexOffset]];
+    const float3 p1 = _ReceiverPositions[_ReceiverIndices[indexOffset + 1]];
+    const float3 p2 = _ReceiverPositions[_ReceiverIndices[indexOffset + 2]];
+    const float3 localNormal = cross(p1 - p0, p2 - p0);
+    const float normalLength = length(localNormal);
+    const float3 normalizedLocalNormal = normalLength > 1e-8
+        ? localNormal / normalLength
+        : float3(0, 1, 0);
+    _ReceiverPrimitiveNormals[_ReceiverPrimitiveOffset + primitiveIndex] = normalize(
+        mul((float3x3)_ReceiverNormalToWorld, normalizedLocalNormal));
 }
