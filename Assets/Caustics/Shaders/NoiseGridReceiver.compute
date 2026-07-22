@@ -1,0 +1,131 @@
+#pragma kernel DeformNoiseGrid
+#pragma kernel BuildPrimitiveNormals
+#pragma target 5.0
+
+StructuredBuffer<float3> _BasePositions;
+RWByteAddressBuffer _VertexBuffer;
+ByteAddressBuffer _IndexBuffer;
+RWStructuredBuffer<float3> _PrimitiveNormals;
+
+uint _VertexCount;
+uint _PrimitiveCount;
+uint _VertexStride;
+uint _PositionOffset;
+uint _NormalOffset;
+uint _PrimitiveOffset;
+float2 _Size;
+float _Amplitude;
+float _Frequency;
+float2 _AnimationOffset;
+float4x4 _NormalToWorld;
+uint _GridPlane;
+
+float3 Mod289(float3 value)
+{
+    return value - floor(value / 289.0) * 289.0;
+}
+
+float2 Mod289(float2 value)
+{
+    return value - floor(value / 289.0) * 289.0;
+}
+
+float3 Permute(float3 value)
+{
+    return Mod289((value * 34.0 + 1.0) * value);
+}
+
+float SimplexNoise(float2 value)
+{
+    const float4 constants = float4(
+        0.211324865405187,
+        0.366025403784439,
+        -0.577350269189626,
+        0.024390243902439);
+    float2 cell = floor(value + dot(value, constants.yy));
+    float2 local0 = value - cell + dot(cell, constants.xx);
+    float2 corner = local0.x > local0.y ? float2(1, 0) : float2(0, 1);
+    float4 local12 = local0.xyxy + constants.xxzz;
+    local12.xy -= corner;
+    cell = Mod289(cell);
+    float3 permutation = Permute(
+        Permute(cell.y + float3(0, corner.y, 1))
+        + cell.x + float3(0, corner.x, 1));
+    float3 attenuation = max(
+        0.5 - float3(
+            dot(local0, local0),
+            dot(local12.xy, local12.xy),
+            dot(local12.zw, local12.zw)),
+        0);
+    attenuation *= attenuation;
+    attenuation *= attenuation;
+    float3 x = 2 * frac(permutation * constants.www) - 1;
+    float3 h = abs(x) - 0.5;
+    float3 ox = floor(x + 0.5);
+    float3 gradients = x - ox;
+    attenuation *= 1.79284291400159 - 0.85373472095314 * (gradients * gradients + h * h);
+    float3 contribution;
+    contribution.x = gradients.x * local0.x + h.x * local0.y;
+    contribution.yz = gradients.yz * local12.xz + h.yz * local12.yw;
+    return 130 * dot(attenuation, contribution);
+}
+
+float EvaluateHeight(float2 position)
+{
+    return _Amplitude * SimplexNoise(position * _Frequency + _AnimationOffset);
+}
+
+void StoreFloat3(uint address, float3 value)
+{
+    _VertexBuffer.Store3(address, asuint(value));
+}
+
+float3 LoadPosition(uint vertexIndex)
+{
+    return asfloat(_VertexBuffer.Load3(vertexIndex * _VertexStride + _PositionOffset));
+}
+
+[numthreads(64, 1, 1)]
+void DeformNoiseGrid(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _VertexCount)
+        return;
+
+    const float3 basePosition = _BasePositions[id.x];
+    const float2 planePosition = _GridPlane == 0 ? basePosition.xz : basePosition.xy;
+    const float epsilon = max(min(_Size.x, _Size.y) / sqrt((float)_VertexCount), 0.0001);
+    const float height = EvaluateHeight(planePosition);
+    const float heightX0 = EvaluateHeight(planePosition - float2(epsilon, 0));
+    const float heightX1 = EvaluateHeight(planePosition + float2(epsilon, 0));
+    const float heightY0 = EvaluateHeight(planePosition - float2(0, epsilon));
+    const float heightY1 = EvaluateHeight(planePosition + float2(0, epsilon));
+    const float derivativeX = (heightX1 - heightX0) / (2 * epsilon);
+    const float derivativeY = (heightY1 - heightY0) / (2 * epsilon);
+    const float3 position = _GridPlane == 0
+        ? float3(basePosition.x, height, basePosition.z)
+        : float3(basePosition.x, basePosition.y, height);
+    const float3 normal = normalize(_GridPlane == 0
+        ? float3(-derivativeX, 1, -derivativeY)
+        : float3(derivativeX, derivativeY, -1));
+    const uint vertexAddress = id.x * _VertexStride;
+    StoreFloat3(vertexAddress + _PositionOffset, position);
+    StoreFloat3(vertexAddress + _NormalOffset, normal);
+}
+
+[numthreads(64, 1, 1)]
+void BuildPrimitiveNormals(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _PrimitiveCount)
+        return;
+
+    const uint indexAddress = id.x * 12;
+    const uint i0 = _IndexBuffer.Load(indexAddress);
+    const uint i1 = _IndexBuffer.Load(indexAddress + 4);
+    const uint i2 = _IndexBuffer.Load(indexAddress + 8);
+    const float3 p0 = LoadPosition(i0);
+    const float3 p1 = LoadPosition(i1);
+    const float3 p2 = LoadPosition(i2);
+    const float3 localNormal = normalize(cross(p1 - p0, p2 - p0));
+    _PrimitiveNormals[_PrimitiveOffset + id.x] = normalize(
+        mul((float3x3)_NormalToWorld, localNormal));
+}

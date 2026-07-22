@@ -169,11 +169,13 @@ namespace CausticMeshDxr
         sealed class ReceiverState
         {
             public MeshRenderer renderer;
+            public ICausticReceiverGeometry geometry;
             public int handle;
             public Matrix4x4 lastTransform;
             public uint instanceId;
             public int primitiveOffset;
             public Vector3[] localPrimitiveNormals;
+            public uint topologyVersion;
         }
 
         enum CausticBlendMode
@@ -381,23 +383,32 @@ namespace CausticMeshDxr
             if (!EnsureInitialized())
                 return;
 
+            if (ReceiverGeometryChanged())
+            {
+                ReleaseResources();
+                if (!EnsureInitialized())
+                    return;
+            }
+
             var incidentDirection = directionalLight.transform.forward.normalized;
             var sourceTransform = transform.localToWorldMatrix;
             var changed = sourceTransform != lastSourceTransform
                 || ReceiverTransformsChanged()
+                || ReceiverGeometryChanged()
                 || incidentDirection != lastIncidentDirection
                 || heightField != lastHeightField
                 || (heightField != null && heightField.StateHash != lastHeightFieldStateHash);
 
             if (!runContinuously
                 && (heightField == null || !heightField.IsTimeVarying)
+                && !HasTimeVaryingReceiver()
                 && hasDispatched
                 && !changed)
             {
                 return;
             }
 
-            UpdateReceiverTransforms();
+            UpdateReceiverGeometryAndTransforms();
 
             Dispatch(incidentDirection);
             lastSourceTransform = sourceTransform;
@@ -417,6 +428,29 @@ namespace CausticMeshDxr
             return false;
         }
 
+        bool ReceiverGeometryChanged()
+        {
+            for (var i = 0; i < receiverStates.Count; i++)
+            {
+                var state = receiverStates[i];
+                if (state.geometry is Behaviour behaviour && !behaviour.isActiveAndEnabled)
+                    return true;
+                if (state.geometry != null && state.geometry.TopologyVersion != state.topologyVersion)
+                    return true;
+            }
+            return false;
+        }
+
+        bool HasTimeVaryingReceiver()
+        {
+            for (var i = 0; i < receiverStates.Count; i++)
+            {
+                if (receiverStates[i].geometry != null && receiverStates[i].geometry.IsTimeVarying)
+                    return true;
+            }
+            return false;
+        }
+
         bool ReceiversChanged()
         {
             if (receivers == null || receivers.Length != receiverStates.Count)
@@ -425,29 +459,63 @@ namespace CausticMeshDxr
             {
                 if (receivers[i] != receiverStates[i].renderer)
                     return true;
+                var geometry = GetReceiverGeometry(receivers[i]);
+                if (geometry != receiverStates[i].geometry
+                    || (geometry != null && geometry.TopologyVersion != receiverStates[i].topologyVersion))
+                    return true;
             }
             return false;
         }
 
-        void UpdateReceiverTransforms()
+        static ICausticReceiverGeometry GetReceiverGeometry(MeshRenderer receiver)
         {
-            var changed = false;
+            if (receiver == null)
+                return null;
+            var behaviours = receiver.GetComponents<MonoBehaviour>();
+            for (var i = 0; i < behaviours.Length; i++)
+            {
+                if (behaviours[i] is ICausticReceiverGeometry geometry
+                    && behaviours[i].isActiveAndEnabled)
+                    return geometry;
+            }
+            return null;
+        }
+
+        void UpdateReceiverGeometryAndTransforms()
+        {
+            var accelerationStructureChanged = false;
+            var normalBufferRequiresCpuRefresh = false;
             for (var i = 0; i < receiverStates.Count; i++)
             {
                 var state = receiverStates[i];
                 var transformMatrix = state.renderer.transform.localToWorldMatrix;
-                if (transformMatrix == state.lastTransform)
-                    continue;
+                if (transformMatrix != state.lastTransform)
+                {
+                    accelerationStructure.UpdateInstanceTransform(state.handle, transformMatrix);
+                    state.lastTransform = transformMatrix;
+                    accelerationStructureChanged = true;
+                    normalBufferRequiresCpuRefresh = true;
+                }
+            }
 
-                accelerationStructure.UpdateInstanceTransform(state.handle, transformMatrix);
-                state.lastTransform = transformMatrix;
-                changed = true;
-            }
-            if (changed)
-            {
-                accelerationStructure.Build();
+            if (normalBufferRequiresCpuRefresh)
                 UpdateReceiverPrimitiveNormals();
+
+            for (var i = 0; i < receiverStates.Count; i++)
+            {
+                var state = receiverStates[i];
+                if (state.geometry == null)
+                    continue;
+                accelerationStructureChanged |= state.geometry.DispatchGeometry(
+                    Time.time,
+                    receiverPrimitiveNormalBuffer,
+                    state.primitiveOffset,
+                    state.renderer.transform.worldToLocalMatrix.transpose,
+                    normalBufferRequiresCpuRefresh);
             }
+
+            if (accelerationStructureChanged)
+                accelerationStructure.Build();
         }
 
         void CreateSharedEdges()
@@ -619,8 +687,11 @@ namespace CausticMeshDxr
                     enabled = false;
                     return false;
                 }
-                var meshFilter = receiver != null ? receiver.GetComponent<MeshFilter>() : null;
-                var mesh = meshFilter != null ? meshFilter.sharedMesh : null;
+                var geometry = GetReceiverGeometry(receiver);
+                var meshFilter = receiver.GetComponent<MeshFilter>();
+                var mesh = geometry != null
+                    ? geometry.PrepareMesh()
+                    : meshFilter != null ? meshFilter.sharedMesh : null;
                 if (mesh == null || mesh.subMeshCount != 1)
                 {
                     Debug.LogError($"Receiver {receiverIndex} must have one mesh and one submesh.", receiver);
@@ -635,6 +706,7 @@ namespace CausticMeshDxr
                     subMeshFlags = RayTracingSubMeshFlags.Enabled | RayTracingSubMeshFlags.ClosestHitOnly,
                     enableTriangleCulling = false,
                     mask = ReceiverMask,
+                    dynamicGeometry = geometry != null,
                 };
                 var instanceId = (uint)(receiverIndex + 1);
                 primitiveOffsets[instanceId] = (uint)totalPrimitiveCount;
@@ -642,17 +714,17 @@ namespace CausticMeshDxr
                 receiverStates.Add(new ReceiverState
                 {
                     renderer = receiver,
+                    geometry = geometry,
                     handle = accelerationStructure.AddInstance(instanceConfig, receiverTransform, null, instanceId),
                     lastTransform = receiverTransform,
                     instanceId = instanceId,
                     primitiveOffset = totalPrimitiveCount,
                     localPrimitiveNormals = primitiveNormals,
+                    topologyVersion = geometry != null ? geometry.TopologyVersion : 0,
                 });
                 totalPrimitiveCount += primitiveNormals.Length;
             }
             primitiveOffsets[receivers.Length + 1] = (uint)totalPrimitiveCount;
-            accelerationStructure.Build();
-
             receiverPrimitiveOffsetBuffer = new GraphicsBuffer(
                 GraphicsBuffer.Target.Structured,
                 primitiveOffsets.Length,
@@ -663,6 +735,16 @@ namespace CausticMeshDxr
                 Mathf.Max(1, totalPrimitiveCount),
                 Marshal.SizeOf<Vector3>());
             UpdateReceiverPrimitiveNormals();
+            foreach (var state in receiverStates)
+            {
+                state.geometry?.DispatchGeometry(
+                    Application.isPlaying ? Time.time : 0,
+                    receiverPrimitiveNormalBuffer,
+                    state.primitiveOffset,
+                    state.renderer.transform.worldToLocalMatrix.transpose,
+                    true);
+            }
+            accelerationStructure.Build();
 
             UpdateSourceVertices();
             sourceVertexBuffer ??= new GraphicsBuffer(
