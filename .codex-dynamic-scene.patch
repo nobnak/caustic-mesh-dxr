@@ -1,0 +1,50 @@
+diff --git a/Assets/Scenes/SampleScene.unity b/Assets/Scenes/SampleScene.unity
+index 2843e36..083b989 100644
+--- a/Assets/Scenes/SampleScene.unity
++++ b/Assets/Scenes/SampleScene.unity
+@@ -990,6 +990,7 @@ GameObject:
+   - component: {fileID: 1052510687}
+   - component: {fileID: 1052510686}
+   - component: {fileID: 1052510685}
++  - component: {fileID: 1052510689}
+   m_Layer: 0
+   m_Name: Receive Floor
+   m_TagString: Untagged
+@@ -1084,13 +1085,34 @@ Transform:
+   m_PrefabAsset: {fileID: 0}
+   m_GameObject: {fileID: 1052510684}
+   serializedVersion: 2
+-  m_LocalRotation: {x: 0.7071068, y: -0, z: -0, w: 0.7071068}
+-  m_LocalPosition: {x: -2, y: -1, z: 0}
+-  m_LocalScale: {x: 30, y: 30, z: 1}
++  m_LocalRotation: {x: 0.7071068, y: 0, z: 0, w: 0.7071068}
++  m_LocalPosition: {x: -2, y: 0, z: 0}
++  m_LocalScale: {x: 10, y: 10, z: 1}
+   m_ConstrainProportionsScale: 0
+   m_Children: []
+   m_Father: {fileID: 2038591479}
+   m_LocalEulerAnglesHint: {x: 90, y: 0, z: 0}
++--- !u!114 &1052510689
++MonoBehaviour:
++  m_ObjectHideFlags: 0
++  m_CorrespondingSourceObject: {fileID: 0}
++  m_PrefabInstance: {fileID: 0}
++  m_PrefabAsset: {fileID: 0}
++  m_GameObject: {fileID: 1052510684}
++  m_Enabled: 1
++  m_EditorHideFlags: 0
++  m_Script: {fileID: 11500000, guid: b415d8fe781f48689d7b95d6255a863a, type: 3}
++  m_Name: 
++  m_EditorClassIdentifier: Assembly-CSharp::CausticMeshDxr.NoiseGridReceiverGeometry
++  deformationShader: {fileID: 7200000, guid: 49c8273c270d4bbda49e08d1a9fefbd4, type: 3}
++  gridPlane: 1
++  size: {x: 1, y: 1}
++  cellsPerAxis: 64
++  amplitude: 0.2
++  frequency: 5
++  animationDirection: {x: 0.23, y: 0.17}
++  animationSpeed: 0.2
++  animate: 1
+ --- !u!1 &1688573387
+ GameObject:
+   m_ObjectHideFlags: 0
