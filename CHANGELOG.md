@@ -3,6 +3,17 @@
 大きな機能追加、設計変更、公開挙動の変更を記録します。
 内容は `main` のコミット履歴と、そこへ統合された開発ブランチをもとに整理しています。
 
+## 2026-10-06
+
+### Added
+
+- 自動ベンチマークおよび比較キャプチャ生成機能 (`CausticBenchmarkRunner`) を追加
+- 学術ショートペーパー原稿（日本語・英語）および実機キャプチャを追加（`docs/arxiv_technical_sketch.md`, `docs/arxiv_technical_sketch_ja.md`）
+
+### Changed
+
+- `CausticRayQueryTest` の非推奨 API を `RayTracingMode` に更新し、外部評価用の `ForceEvaluateAndDispatch` を追加
+
 ## 2026-07-22
 
 ### Added

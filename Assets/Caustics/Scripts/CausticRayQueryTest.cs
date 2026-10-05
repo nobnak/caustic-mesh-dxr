@@ -4,6 +4,7 @@ using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Serialization;
+using RayTracingMode = UnityEngine.Experimental.Rendering.RayTracingMode;
 
 namespace CausticMeshDxr
 {
@@ -247,13 +248,14 @@ namespace CausticMeshDxr
                 || expectedCellCountZ != cellCountZ;
         }
 
-        void UpdateSourceVertices()
+        void UpdateSourceVertices(float evaluationTime = -1f)
         {
             if (GridTopologyChanged())
                 RebuildGridData();
 
             var gridCellSize = actualSourceSize.x / cellCountX;
-            var evaluationTime = Application.isPlaying ? Time.time : 0;
+            if (evaluationTime < 0)
+                evaluationTime = Application.isPlaying ? Time.time : 0;
             for (var z = 0; z <= cellCountZ; z++)
             {
                 for (var x = 0; x <= cellCountX; x++)
@@ -487,8 +489,9 @@ namespace CausticMeshDxr
             return null;
         }
 
-        void UpdateReceiverGeometryAndTransforms()
+        void UpdateReceiverGeometryAndTransforms(float time = -1f)
         {
+            var evalTime = time >= 0 ? time : (Application.isPlaying ? Time.time : 0);
             var accelerationStructureChanged = false;
             var geometryChanged = false;
             for (var i = 0; i < receiverStates.Count; i++)
@@ -508,7 +511,7 @@ namespace CausticMeshDxr
             {
                 var state = receiverStates[i];
                 if (state.geometry != null)
-                    geometryChanged |= state.geometry.DispatchGeometry(Time.time);
+                    geometryChanged |= state.geometry.DispatchGeometry(evalTime);
             }
 
             if (geometryChanged)
@@ -753,7 +756,7 @@ namespace CausticMeshDxr
                     subMeshFlags = RayTracingSubMeshFlags.Enabled | RayTracingSubMeshFlags.ClosestHitOnly,
                     enableTriangleCulling = false,
                     mask = ReceiverMask,
-                    dynamicGeometry = geometry != null,
+                    rayTracingMode = geometry != null ? RayTracingMode.DynamicGeometry : RayTracingMode.Static,
                 };
                 var instanceId = (uint)(receiverIndex + 1);
                 primitiveOffsets[instanceId] = (uint)totalPrimitiveCount;
@@ -870,10 +873,12 @@ namespace CausticMeshDxr
             return true;
         }
 
-        void Dispatch(Vector3 incidentDirection)
+        void Dispatch(Vector3 incidentDirection, float time = -1f, float deltaTime = -1f)
         {
-            if (!TryDispatchSourceVerticesGpu())
-                UpdateSourceVertices();
+            var evalTime = time >= 0 ? time : (Application.isPlaying ? Time.time : 0);
+            var evalDeltaTime = deltaTime >= 0 ? deltaTime : (Application.isPlaying ? Time.deltaTime : 0);
+            if (!TryDispatchSourceVerticesGpu(evalTime, evalDeltaTime))
+                UpdateSourceVertices(evalTime);
             dispatchGeneration++;
             var currentGeneration = dispatchGeneration;
             var currentResourceGeneration = resourceGeneration;
@@ -1086,7 +1091,7 @@ namespace CausticMeshDxr
             }
         }
 
-        bool TryDispatchSourceVerticesGpu()
+        bool TryDispatchSourceVerticesGpu(float time, float deltaTime)
         {
             if (enableValidation || heightField == null)
                 return false;
@@ -1098,8 +1103,8 @@ namespace CausticMeshDxr
                     heightMapWidth,
                     heightMapHeight,
                     actualSourceSize,
-                    Time.time,
-                    Time.deltaTime,
+                    time,
+                    deltaTime,
                     out var heightMap))
                 return false;
 
@@ -1337,6 +1342,28 @@ namespace CausticMeshDxr
         {
             return transform.worldToLocalMatrix.transpose.MultiplyVector(sourceVertices[index].normal).normalized;
         }
+
+        #region Public Interface
+        public void ForceEvaluateAndDispatch(float time = -1f, float deltaTime = -1f)
+        {
+            if (!EnsureInitialized())
+                return;
+
+            if (ReceiverGeometryChanged())
+            {
+                ReleaseResources();
+                if (!EnsureInitialized())
+                    return;
+            }
+
+            var incidentDirection = directionalLight != null
+                ? directionalLight.transform.forward.normalized
+                : Vector3.down;
+            UpdateReceiverGeometryAndTransforms(time);
+            Dispatch(incidentDirection, time, deltaTime);
+            hasDispatched = true;
+        }
+        #endregion
 
         internal static void DrawProjectedCaustics(CommandBuffer commandBuffer, Camera camera)
         {
