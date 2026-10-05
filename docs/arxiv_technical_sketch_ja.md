@@ -101,13 +101,14 @@ Wallace のメッシュ集光モデルを任意3Dシーンに適用した場合�
 #### 全体像（Full Perspective View）
 | (a) 境界細分割 OFF (Baseline: Wallaceの単純拡張) | (b) 境界細分割 ON (Proposed: 提案手法) | (c) 境界ハイライト (Debug) |
 |:---:|:---:|:---:|
-| [`[caustic_pose03_subdivision_off.png を開く]`](../Captures/caustic_pose03_subdivision_off.png) | [`[caustic_pose03_subdivision_on.png を開く]`](../Captures/caustic_pose03_subdivision_on.png) | [`[caustic_pose03_boundary_highlight.png を開く]`](../Captures/caustic_pose03_boundary_highlight.png) |
+| [![caustic_pose03_subdivision_off](../Captures/caustic_pose03_subdivision_off.png)](../Captures/caustic_pose03_subdivision_off.png) | [![caustic_pose03_subdivision_on](../Captures/caustic_pose03_subdivision_on.png)](../Captures/caustic_pose03_subdivision_on.png) | [![caustic_pose03_boundary_highlight](../Captures/caustic_pose03_boundary_highlight.png)](../Captures/caustic_pose03_boundary_highlight.png) |
 
 #### 境界拡大インセット（Cropped Insets: 中央キューブ上辺および受光面境界）
 | (a) 拡大: 境界細分割 OFF (Baseline) | (b) 拡大: 境界細分割 ON (Proposed) | (c) 拡大: 境界ハイライト (Debug) |
 |:---:|:---:|:---:|
-| [`[caustic_pose03_inset_subdivision_off.png を開く]`](../Captures/caustic_pose03_inset_subdivision_off.png) | [`[caustic_pose03_inset_subdivision_on.png を開く]`](../Captures/caustic_pose03_inset_subdivision_on.png) | [`[caustic_pose03_inset_boundary_highlight.png を開く]`](../Captures/caustic_pose03_inset_boundary_highlight.png) |
+| [![caustic_pose03_inset_subdivision_off](../Captures/caustic_pose03_inset_subdivision_off.png)](../Captures/caustic_pose03_inset_subdivision_off.png) | [![caustic_pose03_inset_subdivision_on](../Captures/caustic_pose03_inset_subdivision_on.png)](../Captures/caustic_pose03_inset_subdivision_on.png) | [![caustic_pose03_inset_boundary_highlight](../Captures/caustic_pose03_inset_boundary_highlight.png)](../Captures/caustic_pose03_inset_boundary_highlight.png) |
 | **空間を架橋するフライングポリゴン**: キューブの上面と背後の床面との間隙に、メッシュが空中に引き裂かれて橋渡し状に伸びる致命的な幾何学的テアリングが露呈する。 | **幾何形状への精密な吸着**: 提案手法により、不連続境界を跨ぐサブ三角形が瞬時にカリングされ、キューブのシャープな稜線および床面に沿って集光線が完全に分離・吸着する。 | **境界エッジの抽出**: 異なるインスタンス間および法線急変部（$\mathbf{n}_j \cdot \mathbf{n}_k < \cos 30^\circ$）のみがマゼンタ色で高精度に識別されている。 |
+
 
 - **視覚的分析**: 拡大インセットにより、単純拡張（Baseline）ではキューブの角から空中に伸びる不正三角形が景観を著しく損ねているのに対し、提案手法では受光面の物理的トポロジー境界において集光模様が極めて自然に切断され、実世界の光学現象と同様のシャープな陰影境界が得られることが視覚的に証明された。カリングによる境界付近の極微小な光束損失は視覚的には知覚されず、空間架橋の排除によるリアリティ向上が圧倒的に勝る。
 

@@ -97,12 +97,12 @@ We evaluate our pipeline against the baseline (a naive extension of Wallace's me
 #### Full Perspective View
 | (a) Subdivision OFF (Baseline: Naive Extension) | (b) Subdivision ON (Proposed) | (c) Boundary Highlight (Debug) |
 |:---:|:---:|:---:|
-| [`[caustic_pose03_subdivision_off.png]`](../Captures/caustic_pose03_subdivision_off.png) | [`[caustic_pose03_subdivision_on.png]`](../Captures/caustic_pose03_subdivision_on.png) | [`[caustic_pose03_boundary_highlight.png]`](../Captures/caustic_pose03_boundary_highlight.png) |
+| [![caustic_pose03_subdivision_off](../Captures/caustic_pose03_subdivision_off.png)](../Captures/caustic_pose03_subdivision_off.png) | [![caustic_pose03_subdivision_on](../Captures/caustic_pose03_subdivision_on.png)](../Captures/caustic_pose03_subdivision_on.png) | [![caustic_pose03_boundary_highlight](../Captures/caustic_pose03_boundary_highlight.png)](../Captures/caustic_pose03_boundary_highlight.png) |
 
 #### Cropped Insets: Suspended Cube Silhouette & Floor Boundary
 | (a) Inset: Subdivision OFF (Baseline) | (b) Inset: Subdivision ON (Proposed) | (c) Inset: Boundary Highlight (Debug) |
 |:---:|:---:|:---:|
-| [`[caustic_pose03_inset_subdivision_off.png]`](../Captures/caustic_pose03_inset_subdivision_off.png) | [`[caustic_pose03_inset_subdivision_on.png]`](../Captures/caustic_pose03_inset_subdivision_on.png) | [`[caustic_pose03_inset_boundary_highlight.png]`](../Captures/caustic_pose03_inset_boundary_highlight.png) |
+| [![caustic_pose03_inset_subdivision_off](../Captures/caustic_pose03_inset_subdivision_off.png)](../Captures/caustic_pose03_inset_subdivision_off.png) | [![caustic_pose03_inset_subdivision_on](../Captures/caustic_pose03_inset_subdivision_on.png)](../Captures/caustic_pose03_inset_subdivision_on.png) | [![caustic_pose03_inset_boundary_highlight](../Captures/caustic_pose03_inset_boundary_highlight.png)](../Captures/caustic_pose03_inset_boundary_highlight.png) |
 | **Severe Flying Triangles**: Stretched triangles cross open air between the cube's top edges and the floor, creating prominent geometric tearing artifacts. | **Conformal Surface Snapping**: Discontinuous sub-triangles are culled on the GPU, snapping caustic illumination strictly to the cube contours and floor geometry. | **Discontinuity Classification**: Inter-instance boundaries and sharp crease edges ($\mathbf{n}_j \cdot \mathbf{n}_k < \cos 30^\circ$) are detected in magenta. |
 
 - **Discussion**: The cropped insets demonstrate that naive projection collapses when crossing depth discontinuities. The proposed adaptive subdivision isolates distinct geometric manifolds, preserving razor-sharp optical boundaries without visual tearing. The minimal flux discarded along the culling boundary is imperceptible, whereas the gain in silhouette fidelity is dramatic.
