@@ -79,7 +79,7 @@ Comparison between the baseline (a naive extension of Wallace's method without e
 | $64 \times 64$ | 0.0625 | 8,192 | **1.63 ms** | **613.6 FPS** |
 | $128 \times 128$ | 0.0313 | 32,768 | **1.43 ms** | **699.4 FPS** |
 
-- **Sub-1.5 ms GPU Execution**: Ray queries, discontinuity marking, midpoint refinement, and indirect draw generation execute in **$1.0 \sim 1.6\text{ ms}$ ($>600\text{ FPS}$)**, proving production viability.
+- **Sub-1.5 ms GPU Execution**: Ray queries, discontinuity marking, midpoint refinement, and indirect draw generation execute in **1.03–1.63 ms (>600 FPS)**, proving production viability.
 - **Perimeter Scaling**: Restricting subdivision and midpoint tracing to discontinuous edges guarantees that computational load scales with boundary perimeter $O(\partial \Omega)$ rather than surface area $O(N^2)$, maintaining flat performance even at 32k triangles.
 
 ---
@@ -175,9 +175,7 @@ caustic-mesh-dxr/
 ## 📚 Documentation & References
 
 - 🇬🇧 [Technical Paper / Preprint (English)](docs/preprint.md)
-- 🇯🇵 [プレプリント本文 (日本語版)](docs/preprint_ja.md)
+- 🇯🇵 [Technical Paper / Preprint (Japanese / 日本語版)](docs/preprint_ja.md)
 - 📐 [Architectural Design Specification (architecture.md)](docs/architecture.md)
 - 📊 [Benchmark Results & Evaluation (benchmark_results.md)](docs/benchmark_results.md)
 - 📝 [Changelog (CHANGELOG.md)](CHANGELOG.md)
-
-

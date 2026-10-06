@@ -16,7 +16,7 @@
 - 🇬🇧 **[Technical Paper / Preprint (English)](docs/preprint.md)**
 - 🇯🇵 **[プレプリント本文 (日本語版)](docs/preprint_ja.md)**
 
-**著者**: Nakata Nobuyuki (Nobuyuki Nakata)
+**著者**: Nakata Nobuyuki
 
 ### 論文概要 (Abstract)
 屈折光線メッシュの入射・投影面積比から局所放射照度を直接評価するメッシュベース集光手法（Evan Wallace, 2011/2016; Yuksel & Keyser, 2009）は、物理的な光束（Flux）保存と鮮鋭な集光線を極めて低計算負荷で両立できる優れたアプローチです。しかし従来の実装は受光面を解析的な平面や球、あるいは単一ハイトフィールドに制限しており、任意の複数オブジェクトや段差が存在する実用的な3Dシーンへ一般化すると、**境界を跨ぐ際にメッシュが空中に引き裂かれて橋渡し状に伸びる致命的な幾何学的テアリング（Flying Polygons）** が発生していました。
@@ -45,7 +45,7 @@
 ## 🔬 パイプライン構成 (Architecture Pipeline)
 
 ```
-[入力屈折波面] (GPU Heightfield / 波動方程式 / テクスチャ)
+[入力屈折波面] (GPU Height Field / 波動方程式 / テクスチャ)
        │
        ▼
  [屈折レイ生成] (Snell's Law: refract(L, n, η))
@@ -70,7 +70,7 @@
 
 ## ⚡ 性能ベンチマーク (Performance Benchmarks)
 
-**測定環境**: NVIDIA GeForce RTX 5070 (VRAM 12 GB, Direct3D 12), Unity 6000.3.25f1, 解像度 $1920 \times 1080$, 波動シミュレーション稼働下
+**測定環境**: NVIDIA GeForce RTX 5070 (12 GB VRAM, Direct3D 12)、Unity 6000.3.25f1、画面解像度 1920 × 1080、波動シミュレーション稼働下
 
 | グリッド解像度 | セルサイズ | 生成三角形数 | 平均フレーム時間 (ms) | 想定 FPS |
 |---|---|---|---|---|
@@ -118,7 +118,7 @@
 
 - **Unity**: `6000.3.20f1` 以降 (Universal Render Pipeline `17.3.0`)
 - **Graphics API**: DirectX 12 (DXR 1.1 / Tier 1.1 Ray Tracing 対応 GPU)
-- **Shader Support**: Compute Shader、Inline Ray Query (`RayQuery<RAY_FLAG_NONE>`) が利用可能な環境
+- **Shader Support**: Compute Shader、Inline Ray Queries (`RayQuery<RAY_FLAG_NONE>`) が利用可能な環境
 
 ---
 
@@ -174,7 +174,7 @@ caustic-mesh-dxr/
 
 ## 📚 関連ドキュメント (Documentation)
 
-- 🇬🇧 [Technical Paper / Preprint (English)](docs/preprint.md)
+- 🇬🇧 [プレプリント本文 (英語版 / English)](docs/preprint.md)
 - 🇯🇵 [プレプリント本文 (日本語版)](docs/preprint_ja.md)
 - 📐 [全体アーキテクチャ・設計詳細 (architecture.md)](docs/architecture.md)
 - 📊 [ベンチマーク測定結果 (benchmark_results.md)](docs/benchmark_results.md)

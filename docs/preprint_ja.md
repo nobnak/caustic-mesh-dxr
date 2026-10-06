@@ -117,16 +117,16 @@ Wallace のメッシュ集光モデルを任意3Dシーンに適用した場合�
 本手法は **Unity 6000.3 (URP 17.3)** 上に実装し、DirectX 12 DXR 1.1 を用いて検証を行った。
 
 ### 4.1 実機ベンチマーク測定
-**NVIDIA GeForce RTX 5070 (VRAM 12 GB, Direct3D 12)**、Unity 6000.3.25f1、画面解像度 $1920 \times 1080$、波動シミュレーション稼働下における測定結果：
+**NVIDIA GeForce RTX 5070 (12 GB VRAM, Direct3D 12)**、Unity 6000.3.25f1、画面解像度 1920 × 1080、波動シミュレーション稼働下における測定結果：
 
 | グリッド解像度 | セルサイズ | 生成三角形数 | 平均フレーム時間 (ms) | 想定 FPS |
 |---|---|---|---|---|
-| $16 \times 16$ | CellSize = 0.2500 | 512 | **1.03 ms** | **968.1 FPS** |
-| $32 \times 32$ | CellSize = 0.1250 | 2,048 | **1.26 ms** | **790.6 FPS** |
-| $64 \times 64$ | CellSize = 0.0625 | 8,192 | **1.63 ms** | **613.6 FPS** |
-| $128 \times 128$ | CellSize = 0.0313 | 32,768 | **1.43 ms** | **699.4 FPS** |
+| $16 \times 16$ | 0.2500 | 512 | **1.03 ms** | **968.1 FPS** |
+| $32 \times 32$ | 0.1250 | 2,048 | **1.26 ms** | **790.6 FPS** |
+| $64 \times 64$ | 0.0625 | 8,192 | **1.63 ms** | **613.6 FPS** |
+| $128 \times 128$ | 0.0313 | 32,768 | **1.43 ms** | **699.4 FPS** |
 
-- **Wallace手法を実用ゲームへ導入可能な高効率性**: レイクエリ、境界検出、適応細分割、Indirect Draw 発行を含む全コンピュート工程が **1.0 〜 1.6 ms（>600 FPS）** で完結する。
+- **Wallace手法を実用ゲームへ導入可能な高効率性**: レイクエリ、境界検出、適応細分割、Indirect Draw 発行を含む全コンピュート工程が **1.03〜1.63 ms（>600 FPS）** で完結する。
 - **周囲長スケーリングの優位性**: 32,768 ポリゴン時でもフレーム時間は 1.5 ms 未満にとどまる。細分割とレイ再追跡の対象を境界エッジのみに絞り込んだことで、格子数増加に伴う計算爆発を回避し、実用的なスケーラビリティを担保している。
 
 ---
@@ -154,7 +154,3 @@ Wallace のメッシュ集光モデルを任意3Dシーンに適用した場合�
 4. **Ernst, M., et al.** (2005). Filtered caustics using caustic volumes. *Eurographics Symposium on Rendering*.
 5. **Guardado, J., & Sánchez-Crespo, D.** (2004). Rendering water caustics. *GPU Gems*, 1, 129–144.
 6. **Microsoft Corporation**. (2018). DirectX Raytracing (DXR) Functional Specification: Inline Ray Tracing / Ray Query.
-
-
-
-

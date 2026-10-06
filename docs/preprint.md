@@ -1,7 +1,7 @@
 # Resolving Geometric Discontinuities in Mesh-Based Caustics on Dynamic 3D Environments
 ## ― Extending Evan Wallace's Area-Ratio Formulation to Arbitrary Geometries via Inline Ray Queries and Adaptive Edge Subdivision ―
 
-> **Related Document**: [日本語版 (preprint_ja.md)](preprint_ja.md) | [Repository README](../README.md)
+> **Related Document**: [Japanese Version (preprint_ja.md)](preprint_ja.md) | [Repository Root (README.md)](../README.md)
 
 **Author**: Nobuyuki Nakata
 
@@ -121,7 +121,7 @@ Evaluated on an **RTX 5070 (12 GB VRAM, Direct3D 12)** at $1920 \times 1080$ res
 | $64 \times 64$ | 0.0625 | 8,192 | **1.63 ms** | **613.6 FPS** |
 | $128 \times 128$ | 0.0313 | 32,768 | **1.43 ms** | **699.4 FPS** |
 
-- **Sub-1.5 ms GPU Execution**: Ray queries, discontinuity marking, midpoint refinement, and indirect draw generation execute in **$1.0 \sim 1.6\text{ ms}$ ($>600\text{ FPS}$)**, proving production viability.
+- **Sub-1.5 ms GPU Execution**: Ray queries, discontinuity marking, midpoint refinement, and indirect draw generation execute in **$1.03 \sim 1.63\text{ ms}$ ($>600\text{ FPS}$)**, proving production viability.
 - **Perimeter Scaling**: Restricting subdivision and midpoint tracing to discontinuous edges guarantees that computational load scales with boundary perimeter $O(\partial \Omega)$ rather than surface area, maintaining flat performance even at 32k triangles.
 
 ---
@@ -149,6 +149,3 @@ We have presented an end-to-end framework resolving the two fundamental barriers
 4. **Ernst, M., et al.** (2005). Filtered caustics using caustic volumes. *Eurographics Symposium on Rendering*.
 5. **Guardado, J., & Sánchez-Crespo, D.** (2004). Rendering water caustics. *GPU Gems*, 1, 129–144.
 6. **Microsoft Corporation**. (2018). DirectX Raytracing (DXR) Functional Specification: Inline Ray Tracing / Ray Query.
-
-
-
