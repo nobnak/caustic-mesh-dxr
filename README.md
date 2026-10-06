@@ -9,6 +9,14 @@
 
 ---
 
+## 🎬 Demo Videos
+
+| [![caustic mesh dxr 018](https://i.ytimg.com/vi/tisJxJTinNE/hqdefault.jpg)](https://youtube.com/shorts/tisJxJTinNE) | [![caustic mesh dxr 017](https://i.ytimg.com/vi/nC7Uqknv3Bs/hqdefault.jpg)](https://youtube.com/shorts/nC7Uqknv3Bs) | [![Caustics and Shadows 02](https://i.ytimg.com/vi/uYrBOEWBq-4/hqdefault.jpg)](https://youtube.com/shorts/uYrBOEWBq-4) |
+|:---:|:---:|:---:|
+| [caustic mesh dxr 018](https://youtube.com/shorts/tisJxJTinNE) | [caustic mesh dxr 017](https://youtube.com/shorts/nC7Uqknv3Bs) | [Caustics and Shadows 02](https://youtube.com/shorts/uYrBOEWBq-4) |
+
+---
+
 ## 📄 Technical Paper / Preprint
 
 The complete research paper detailing the mathematical formulation, geometric tearing elimination algorithm, and empirical benchmarks on an NVIDIA GeForce RTX 5070 GPU is available in Markdown format:

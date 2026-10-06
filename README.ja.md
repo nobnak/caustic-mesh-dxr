@@ -9,6 +9,14 @@
 
 ---
 
+## 🎬 デモ映像 (Demo Videos)
+
+| [![caustic mesh dxr 018](https://i.ytimg.com/vi/tisJxJTinNE/hqdefault.jpg)](https://youtube.com/shorts/tisJxJTinNE) | [![caustic mesh dxr 017](https://i.ytimg.com/vi/nC7Uqknv3Bs/hqdefault.jpg)](https://youtube.com/shorts/nC7Uqknv3Bs) | [![Caustics and Shadows 02](https://i.ytimg.com/vi/uYrBOEWBq-4/hqdefault.jpg)](https://youtube.com/shorts/uYrBOEWBq-4) |
+|:---:|:---:|:---:|
+| [caustic mesh dxr 018](https://youtube.com/shorts/tisJxJTinNE) | [caustic mesh dxr 017](https://youtube.com/shorts/nC7Uqknv3Bs) | [Caustics and Shadows 02](https://youtube.com/shorts/uYrBOEWBq-4) |
+
+---
+
 ## 📄 Preprint / 技術論文
 
 本プロジェクトの理論的背景、幾何学的テアリング（Flying Polygons）の解消アルゴリズム、および NVIDIA GeForce RTX 5070 でのベンチマーク・視覚的検証をまとめたプレプリント（技術論文）を Markdown 形式で全文公開しています。
