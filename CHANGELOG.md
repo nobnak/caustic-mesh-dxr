@@ -8,10 +8,11 @@
 ### Added
 
 - 自動ベンチマークおよび比較キャプチャ生成機能 (`CausticBenchmarkRunner`) を追加
-- 学術ショートペーパー原稿（日本語・英語）および実機キャプチャを追加（`docs/arxiv_technical_sketch.md`, `docs/arxiv_technical_sketch_ja.md`）
+- 技術論文・プレプリント（日本語・英語）および実機検証キャプチャを公開（`docs/preprint.md`, `docs/preprint_ja.md`）
 
 ### Changed
 
+- `README.md` をリニューアルし、プレプリント本文へのリンク、境界テアリング解消の視覚的比較、パイプライン構成図、RTX 5070 ベンチマークを掲載
 - `CausticRayQueryTest` の非推奨 API を `RayTracingMode` に更新し、外部評価用の `ForceEvaluateAndDispatch` を追加
 
 ## 2026-07-22

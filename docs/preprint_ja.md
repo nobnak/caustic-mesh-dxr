@@ -1,11 +1,9 @@
 # 動的3Dジオメトリへのメッシュベース集光投影における境界不連続性解消法
 ## ― Evan Wallace の面積比集光モデルを任意ポリゴン環境へ拡張するインラインレイクエリと適応的エッジ細分割 ―
 
-> **Related Document**: [English Version (arxiv_technical_sketch.md)](arxiv_technical_sketch.md)
+> **関連ドキュメント**: [English Version (preprint.md)](preprint.md) | [リポジトリトップ (README.md)](../README.md)
 
-**著者**: Nakata Nobuyuki  
-**所属**: teamLab Inc.  
-**想定カテゴリ**: ACM SIGGRAPH Technical Sketch / arXiv:cs.GR / 画像電子学会 / 情報処理学会コンピュータグラフィックスとCAD研究会
+**著者**: Nakata Nobuyuki
 
 ---
 
@@ -157,73 +155,6 @@ Wallace のメッシュ集光モデルを任意3Dシーンに適用した場合�
 5. **Guardado, J., & Sánchez-Crespo, D.** (2004). Rendering water caustics. *GPU Gems*, 1, 129–144.
 6. **Microsoft Corporation**. (2018). DirectX Raytracing (DXR) Functional Specification: Inline Ray Tracing / Ray Query.
 
----
 
-## 付録: 日本語論文形式 LaTeX ソース (学会・研究会スタイル)
-
-```latex
-\documentclass[dvipdfmx,twocolumn]{ujarticle}
-\usepackage{amsmath,amssymb}
-\usepackage{graphicx}
-\usepackage{url}
-\usepackage{booktabs}
-
-\title{動的3Dジオメトリへのメッシュベース集光投影における境界不連続性解消法\\
-\large ― Evan Wallace の面積比集光モデルを任意ポリゴン環境へ拡張するインラインレイクエリと適応的エッジ細分割 ―}
-\author{Nakata Nobuyuki\thanks{teamLab Inc.}}
-\date{}
-
-\begin{document}
-\maketitle
-
-\begin{abstract}
-屈折光線メッシュの投影面積比から輝度を評価する集光手法（Wallace 2011, Yuksel 2009）は高品位な集光を低負荷で実現するが，解析的受光面に限定され，任意の3Dシーンではオブジェクト境界を跨ぐメッシュのテアリング（フライングポリゴン）が発生していた．本研究では，DXRインラインレイクエリによる受光面分類と，エッジ単位の適応的中点細分割・カリングを統合し，境界周囲長スケール $O(\partial \Omega)$ で破綻を完全排除した．RTX 5070上で 1.03--1.43\,ms（>600\,FPS）で動作し，実用的な3Dゲーム環境への拡張を実証した．
-\end{abstract}
-
-\section{はじめに}
-屈折面から投射される光線束の入射面積 $A_{\text{in}}$ と受光面積 $A_{\text{out}}$ の比から照度を評価するメッシュベース集光（Wallace 2011, Yuksel 2009）は，エネルギー保存と鮮鋭な集光線を両立する．しかし，従来の実装は解析的受光面（平面・球）に依存しており，任意のポリゴンメッシュへ投影すると，隣接頂点が異なるオブジェクトや段差に跨がった際に空中に引き伸ばされた巨大な不正三角形（フライングポリゴン）が発生する．本研究ではこの幾何学的境界問題を解決し，既存手法の限界を打破するGPU適応パイプラインを提案する．
-
-\section{提案手法}
-\subsection{DXRインラインレイクエリによる受光面分類}
-スネルの法則で生成した屈折レイに対し，TLASへのインラインレイクエリを実行することで，任意の動的変形メッシュとの交差座標 $\mathbf{h}_i$，インスタンスID $\text{id}_i$，受光面法線 $\mathbf{n}_{r, i}$ を取得する．
-
-\subsection{エッジ不連続性検出と適応的中点細分割・カリング}
-各エッジの両端点で $\text{id}_j \neq \text{id}_k$ または $\mathbf{n}_{r,j} \cdot \mathbf{n}_{r,k} < \cos \theta_{\text{thresh}}$ を検出し，不連続境界のみ中点から追加レイクエリを実行する（計算量は境界周囲長 $O(\partial \Omega)$ に抑制）．三角形を 2〜4 分割し，異なるインスタンスを跨ぐサブ三角形をGPU上でカリングする（局所的保守近似）．これにより，分岐発散を避けた単段細分割で幾何テアリングを完全に切除する．
-
-\begin{figure*}[t]
-\centering
-\begin{minipage}{0.32\textwidth}
-  \centering
-  \includegraphics[width=\linewidth]{caustic_pose03_subdivision_off.png}\\[1mm]
-  \includegraphics[width=\linewidth]{caustic_pose03_inset_subdivision_off.png}\\[1mm]
-  {\small (a) 細分割 OFF (Baseline: Wallace拡張)}
-\end{minipage}\hfill
-\begin{minipage}{0.32\textwidth}
-  \centering
-  \includegraphics[width=\linewidth]{caustic_pose03_subdivision_on.png}\\[1mm]
-  \includegraphics[width=\linewidth]{caustic_pose03_inset_subdivision_on.png}\\[1mm]
-  {\small (b) 細分割 ON (提案手法)}
-\end{minipage}\hfill
-\begin{minipage}{0.32\textwidth}
-  \centering
-  \includegraphics[width=\linewidth]{caustic_pose03_boundary_highlight.png}\\[1mm]
-  \includegraphics[width=\linewidth]{caustic_pose03_inset_boundary_highlight.png}\\[1mm]
-  {\small (c) 境界検出ハイライト (Debug)}
-\end{minipage}
-\caption{動的受光面環境における集光境界処理の比較（上段: 全体像，下段: 中央キューブと受光面境界の拡大インセット）．(a) 単純拡張では段差・キューブ輪郭部においてメッシュが空中に伸びるアーティファクトが発生するが，(b) 提案手法では輪郭に沿って集光メッシュが正確に吸着・切断される．(c) マゼンタ色で識別された不連続境界エッジ．}
-\label{fig:comparison}
-\end{figure*}
-
-\section{結果と考察}
-Unity 6 (URP 17.3) 上で実装し，GPU間接描画（\texttt{DrawProceduralIndirect}）によりテクスチャ不要の直接描画を実現した．RTX 5070における実測では，全処理時間は 1.03\,ms（512ポリゴン）〜1.43\,ms（32,768ポリゴン）となり，600\,FPSを超える超高速描画と境界破綻の完全排除を達成した．
-
-\begin{thebibliography}{9}
-\bibitem{wallace2016} E. Wallace, ``Rendering Realtime Caustics in WebGL,'' \textit{Medium Technical Article}, 2016.
-\bibitem{yuksel2009} C. Yuksel, J. Keyser, ``Fast simulation of caustics on arbitrary surfaces,'' \textit{Computer Graphics Forum}, vol. 28, no. 2, pp. 347--356, 2009.
-\bibitem{wyman2008} C. Wyman, ``Hierarchical caustic maps,'' \textit{Proc. I3D}, pp. 163--171, 2008.
-\end{thebibliography}
-
-\end{document}
-```
 
 

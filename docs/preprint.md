@@ -1,11 +1,9 @@
 # Resolving Geometric Discontinuities in Mesh-Based Caustics on Dynamic 3D Environments
 ## ― Extending Evan Wallace's Area-Ratio Formulation to Arbitrary Geometries via Inline Ray Queries and Adaptive Edge Subdivision ―
 
-> **Related Document**: [日本語版 (arxiv_technical_sketch_ja.md)](arxiv_technical_sketch_ja.md)
+> **Related Document**: [日本語版 (preprint_ja.md)](preprint_ja.md) | [Repository README](../README.md)
 
-**Author**: Nobuyuki Nakata (Nakata Nobuyuki)  
-**Affiliation**: teamLab Inc.  
-**Target Category**: ACM SIGGRAPH Technical Sketch / arXiv:cs.GR (Computer Science - Graphics)
+**Author**: Nobuyuki Nakata
 
 ---
 
@@ -152,70 +150,5 @@ We have presented an end-to-end framework resolving the two fundamental barriers
 5. **Guardado, J., & Sánchez-Crespo, D.** (2004). Rendering water caustics. *GPU Gems*, 1, 129–144.
 6. **Microsoft Corporation**. (2018). DirectX Raytracing (DXR) Functional Specification: Inline Ray Tracing / Ray Query.
 
----
 
-## Appendix: Complete LaTeX Source (ACM / arXiv Template Ready)
-
-```latex
-\documentclass[sigconf,nonacm]{acmart}
-
-\title{Resolving Geometric Discontinuities in Mesh-Based Caustics on Dynamic 3D Environments}
-\subtitle{Extending Evan Wallace's Area-Ratio Formulation to Arbitrary Geometries via Inline Ray Queries and Adaptive Edge Subdivision}
-\author{Nobuyuki Nakata}
-\affiliation{\institution{teamLab Inc.}}
-\email{nakata@teamlab.art}
-
-\begin{document}
-
-\begin{abstract}
-While mesh-based caustics based on flux area ratios (Wallace 2011, Yuksel 2009) provide sharp caustics at high performance, they are constrained to analytical geometries and suffer from severe geometric tearing (flying polygons) across depth discontinuities. We propose an end-to-end GPU pipeline coupling DXR 1.1 inline ray queries with edge-based adaptive midpoint subdivision and conservative culling. Our method eliminates geometric tearing on arbitrary dynamic meshes, scaling with boundary perimeter $O(\partial \Omega)$ and executing in 1.03--1.43\,ms (>600\,FPS) on an RTX 5070 GPU in Unity URP.
-\end{abstract}
-
-\maketitle
-
-\section{Introduction and Prior Art}
-Projecting refractive triangle meshes onto receiver surfaces (Wallace 2011, Yuksel 2009) evaluates irradiance via the Jacobian ratio $\Phi \propto A_{\text{in}} / A_{\text{out}}$, preserving crisp caustic cusps. However, previous works relied on closed-form analytical intersections (planes or spheres) or 2D caustic maps. Generalizing this method to arbitrary 3D geometry causes adjacent vertices to straddle separate objects, producing massive stretched triangles (flying polygons) across open space. We resolve this foundational barrier.
-
-\section{Methodology}
-\subsection{Inline Ray Queries on Arbitrary Geometry}
-Refracted rays $\mathbf{d}_i = \text{refract}(\mathbf{L}, \mathbf{n}_i, \eta)$ query a unified TLAS via DXR 1.1 inline ray tracing, retrieving world hit position $\mathbf{h}_i$, instance ID $\text{id}_i$, and receiver normal $\mathbf{n}_{r, i}$ for arbitrary deforming meshes.
-
-\subsection{Adaptive Edge Subdivision and Conservative Culling}
-Boundary edges are classified when $\text{id}_j \neq \text{id}_k$ or $\mathbf{n}_{r, j} \cdot \mathbf{n}_{r, k} < \cos \theta_{\text{thresh}}$. Additional midpoint rays are traced exclusively along marked boundaries ($O(\partial \Omega)$ overhead). Triangles are adaptively subdivided (2--4 sub-triangles), and cross-instance sub-triangles are culled on the GPU as a local conservative approximation, completely eliminating flying geometry without warp divergence.
-
-\begin{figure*}[t]
-\centering
-\begin{minipage}{0.32\textwidth}
-  \centering
-  \includegraphics[width=\linewidth]{caustic_pose03_subdivision_off.png}\\[1mm]
-  \includegraphics[width=\linewidth]{caustic_pose03_inset_subdivision_off.png}\\[1mm]
-  {\small (a) Subdivision OFF (Baseline)}
-\end{minipage}\hfill
-\begin{minipage}{0.32\textwidth}
-  \centering
-  \includegraphics[width=\linewidth]{caustic_pose03_subdivision_on.png}\\[1mm]
-  \includegraphics[width=\linewidth]{caustic_pose03_inset_subdivision_on.png}\\[1mm]
-  {\small (b) Subdivision ON (Proposed)}
-\end{minipage}\hfill
-\begin{minipage}{0.32\textwidth}
-  \centering
-  \includegraphics[width=\linewidth]{caustic_pose03_boundary_highlight.png}\\[1mm]
-  \includegraphics[width=\linewidth]{caustic_pose03_inset_boundary_highlight.png}\\[1mm]
-  {\small (c) Boundary Highlight (Debug)}
-\end{minipage}
-\caption{Visual comparison on multi-object receiver geometry under active wave dynamics. Top: Full perspective view. Bottom: Cropped insets of the middle cube and floor boundary. (a) Baseline: Stretched flying triangles bridge open air. (b) Proposed: Caustics snap cleanly to geometry without tearing. (c) Edge discontinuity classification in magenta.}
-\label{fig:comparison}
-\end{figure*}
-
-\section{Results and Performance}
-Implemented in Unity 6 URP 17.3 using GPU indirect draw calls (\texttt{DrawProceduralIndirect}), eliminating 2D texture intermediate buffers. On an NVIDIA GeForce RTX 5070 ($1920 \times 1080$), frame times range from 1.03\,ms (512 $\Delta$) to 1.43\,ms (32,768 $\Delta$), consistently exceeding 600\,FPS while completely resolving geometric tearing.
-
-\begin{thebibliography}{9}
-\bibitem{wallace2016} E. Wallace, ``Rendering Realtime Caustics in WebGL,'' \textit{Medium Technical Article}, 2016.
-\bibitem{yuksel2009} C. Yuksel, J. Keyser, ``Fast simulation of caustics on arbitrary surfaces,'' \textit{Computer Graphics Forum}, vol. 28, no. 2, pp. 347--356, 2009.
-\bibitem{wyman2008} C. Wyman, ``Hierarchical caustic maps,'' \textit{Proc. I3D}, pp. 163--171, 2008.
-\end{thebibliography}
-
-\end{document}
-```
 
