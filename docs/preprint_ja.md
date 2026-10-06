@@ -1,7 +1,7 @@
 # 動的3Dジオメトリへのメッシュベース集光投影における境界不連続性解消法
 ## ― Evan Wallace の面積比集光モデルを任意ポリゴン環境へ拡張するインラインレイクエリと適応的エッジ細分割 ―
 
-> **関連ドキュメント**: [English Version (preprint.md)](preprint.md) | [リポジトリトップ (README.md)](../README.md)
+> **関連ドキュメント**: [English Version (preprint.md)](preprint.md) | [リポジトリトップ (README.ja.md)](../README.ja.md)
 
 **著者**: Nakata Nobuyuki
 
