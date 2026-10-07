@@ -51,7 +51,7 @@ CPU 側の `CausticRayQueryTest` は scene object と GPU resource のライフ�
    intensity = A_in / max(A_out, Min Receiver Area)
    ```
 
-   `Intensity Scale` を乗じた値を投影結果へ格納します。無効なヒット、裏向きの面、面積が 0 の三角形は破棄します。
+   `Intensity Scale` を乗じた値を投影結果へ格納します。無効なヒット、裏向きの面、面積が 0 の三角形は破棄します。（微分と外積から面積・強度を求める幾何・物理理論の詳細は [caustic_triangle_derivative_area.md](file:///c:/Users/nakata/Repo/caustic-mesh-dxr/docs/caustic_triangle_derivative_area.md) を参照）
 
 6. **receiver 境界を検出・分割する**
    `MarkBoundaryEdges` は、異なる receiver にまたがるエッジ、または receiver normal の差が閾値を超えるエッジをマークします。`TraceEdgeMidpoints` で境界エッジの中点を再追跡し、`BuildProjectedTriangles` がマークされたエッジに沿って三角形を分割します。これにより、1 枚の source triangle が receiver の不連続な領域をまたいで描画されることを避けます。
@@ -113,5 +113,10 @@ validation 有効時は GPU height field 経路を使わず、CPU `Evaluate` 経
 - receiver が source ray の経路にない場合、その source vertex/triangle は無効になる
 - これは投影三角形による近似であり、caustics のエネルギー保存や厚みのある媒質を完全には扱わない
 - DXR、inline ray query、Compute Shader、URP RenderGraph が利用できる GPU/API が必要
+
+## 関連ドキュメント
+
+- [caustic_pipeline_guide_for_cg_engineers.md](file:///c:/Users/nakata/Repo/caustic-mesh-dxr/docs/caustic_pipeline_guide_for_cg_engineers.md): 境界適応型メッシュ集光パイプラインのアルゴリズム解説（3DCG エンジニア向け入門ガイド）
+- [caustic_triangle_derivative_area.md](file:///c:/Users/nakata/Repo/caustic-mesh-dxr/docs/caustic_triangle_derivative_area.md): 投影三角形の微分から面積・照度を求める理論と仕組み
 
 大きな設計変更は [CHANGELOG.md](../CHANGELOG.md) に記録します。

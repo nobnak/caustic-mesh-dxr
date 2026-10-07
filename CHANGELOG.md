@@ -3,6 +3,13 @@
 大きな機能追加、設計変更、公開挙動の変更を記録します。
 内容は `main` のコミット履歴と、そこへ統合された開発ブランチをもとに整理しています。
 
+## 2026-10-07
+
+### Added
+
+- 投影三角形の微分・面積比集光モデルの解説ドキュメント (`docs/caustic_triangle_derivative_area.md`) を追加
+- 3DCG エンジニア向け境界適応型メッシュ集光パイプライン解説ドキュメント (`docs/caustic_pipeline_guide_for_cg_engineers.md`) を追加
+
 ## 2026-10-06
 
 ### Added
