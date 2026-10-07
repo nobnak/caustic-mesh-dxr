@@ -1,0 +1,43 @@
+name: Build Preprint PDF
+
+on:
+  push:
+    paths:
+      - 'docs/preprint*.md'
+      - 'docs/preprint-style.css'
+      - 'Captures/**'
+      - '.github/workflows/build-preprint-pdf.yml'
+  workflow_dispatch:
+
+jobs:
+  build-pdf:
+    name: Build Academic Preprint PDFs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Japanese fonts & Vivliostyle CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
+          npm install -g @vivliostyle/cli
+
+      - name: Build Preprint PDFs (EN & JA)
+        run: |
+          vivliostyle build
+
+      - name: Upload PDF Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: preprint-pdfs
+          path: |
+            docs/preprint.pdf
+            docs/preprint_ja.pdf
+          retention-days: 30

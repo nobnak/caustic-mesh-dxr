@@ -107,3 +107,7 @@ InitTestScene*.unity*
 
 # VS Code
 .vscode/
+
+# Vivliostyle & PDF builds
+.vivliostyle/
+*.pdf

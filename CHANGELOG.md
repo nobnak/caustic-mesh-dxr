@@ -9,6 +9,7 @@
 
 - 投影三角形の微分・面積比集光モデルの解説ドキュメント (`docs/caustic_triangle_derivative_area.md`) を追加
 - 3DCG エンジニア向け境界適応型メッシュ集光パイプライン解説ドキュメント (`docs/caustic_pipeline_guide_for_cg_engineers.md`) を追加
+- プレプリント更新時に Vivliostyle で PDF を自動生成・Artifact 保存する GitHub Actions ワークフロー (`.github/workflows/build-preprint-pdf.yml`) を追加
 
 ## 2026-10-06
 
